@@ -57,3 +57,22 @@ def test_ambiguous_candidates_are_settled_by_round_trip(tmp_path):
     Engine(apple, spotify, st, cfg).seed()
     assert st.native_id("track:ISRC-A2", SPOTIFY) == "sp-a"      # paired with the right edition
     assert "sp-a" in spotify.liked_ and "sp-x" in spotify.liked_  # the other edition was added, not swapped
+
+
+def test_apple_item_without_code_is_still_recognised(tmp_path):
+    """An album/track with no catalog link on Apple must not get its Spotify twin removed."""
+    from music_sync.models import ALBUM, Item
+    from music_sync.providers.base import Listing
+    w = world(("UPC-P", "Painted", "Lucky Daye", None, "am-p", "sp-p"))
+    apple, spotify = Fake(APPLE, w), Fake(SPOTIFY, w)
+    uncoded = Item(kind=ALBUM, side=APPLE, native_id="l.moving", title="Moving Forward", artist="Oli Howe")
+    twin = Item(kind=ALBUM, side=SPOTIFY, native_id="sp-moving", title="Moving Forward", artist="Oli Howe")
+    apple.albums = lambda: Listing(items=[uncoded], complete=True)
+    spotify.albums = lambda: Listing(items=[twin], complete=True)
+    removed = []
+    spotify.unsave_albums = lambda items: removed.extend(i.native_id for i in items)
+    cfg = Config(state_path=tmp_path / "s.db", sync_liked=False, sync_playlists=False); cfg.apple_user_token = "x"
+    st = State(cfg.state_path)
+    Engine(apple, spotify, st, cfg).seed()
+    assert removed == []
+    assert st.last_known("albums") == {"album:apple:l.moving"}

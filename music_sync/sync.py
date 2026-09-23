@@ -306,8 +306,10 @@ class Engine:
         ids = self.state.identities_for(SPOTIFY, [it.native_id for it in s_items])
         by_fuzzy: dict[str, list[Item]] = {}
         for it in a_items:
-            if it.code:
-                by_fuzzy.setdefault(it.fuzzy_key, []).append(it)
+            # Items without a code (no catalog link) are keyed on their stable
+            # library id; leaving them out would make their Spotify twin look
+            # absent from Apple and get it removed.
+            by_fuzzy.setdefault(it.fuzzy_key, []).append(it)
         for it in s_items:
             if it.native_id in ids:
                 continue
@@ -316,8 +318,8 @@ class Engine:
                 chosen = cands[0]
             else:
                 try:
-                    chosen = next((c for c in cands
-                                   if any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
+                    chosen = next((c for c in cands if c.code
+                                   and any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
                 except SearchQuota as e:
                     if seed:
                         # Guessing here could remove the wrong edition; wait for the quota.
