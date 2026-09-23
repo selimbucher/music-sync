@@ -3,7 +3,7 @@ from music_sync.config import Config
 from music_sync.models import APPLE, SPOTIFY
 from music_sync.state import State
 from music_sync.sync import LIKED, Engine
-from tests.fakes import Fake, world
+from tests.fakes import Fake, world, writes
 
 
 def test_one_second_duration_difference_still_reconciles(tmp_path):
@@ -18,7 +18,7 @@ def test_one_second_duration_difference_still_reconciles(tmp_path):
     cfg = Config(state_path=tmp_path / "s.db", sync_albums=False, sync_playlists=False); cfg.apple_user_token = "x"
     e = Engine(apple, spotify, State(cfg.state_path), cfg)
     e.seed()
-    assert not any(c[0] in ("like", "unlike") for c in spotify.calls)   # recognised: nothing removed or re-added
+    assert not writes(spotify)   # recognised: nothing removed or re-added
 
 
 def test_unique_fuzzy_candidate_is_accepted_without_round_trip(tmp_path):
@@ -29,7 +29,7 @@ def test_unique_fuzzy_candidate_is_accepted_without_round_trip(tmp_path):
     apple.liked_, spotify.liked_ = ["am-a"], ["sp-a"]
     cfg = Config(state_path=tmp_path / "s.db", sync_albums=False, sync_playlists=False); cfg.apple_user_token = "x"
     Engine(apple, spotify, State(cfg.state_path), cfg).seed()
-    assert spotify.liked_ == ["sp-a"] and not spotify.calls
+    assert spotify.liked_ == ["sp-a"] and not writes(spotify)
 
 
 def test_unique_candidate_costs_no_spotify_search(tmp_path):
@@ -43,7 +43,7 @@ def test_unique_candidate_costs_no_spotify_search(tmp_path):
     cfg = Config(state_path=tmp_path / "s.db", sync_albums=False, sync_playlists=False); cfg.apple_user_token = "x"
     Engine(apple, spotify, State(cfg.state_path), cfg).seed()
     assert searches == []                                   # both pairs unique: zero lookups
-    assert not spotify.calls                                # and nothing removed or re-added
+    assert not writes(spotify)                              # and nothing removed or re-added
 
 
 def test_ambiguous_candidates_are_settled_by_round_trip(tmp_path):

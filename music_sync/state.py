@@ -71,6 +71,17 @@ CREATE TABLE IF NOT EXISTS journal (
 );
 CREATE INDEX IF NOT EXISTS journal_run ON journal(run);
 
+-- Last complete listing per (collection, side), reused while the provider's
+-- cheap signature (playlist snapshot, liked-set fingerprint) is unchanged.
+CREATE TABLE IF NOT EXISTS listing_cache (
+    collection TEXT NOT NULL,
+    side       TEXT NOT NULL,
+    signature  TEXT NOT NULL,
+    ts         REAL NOT NULL,
+    items      TEXT NOT NULL,
+    PRIMARY KEY (collection, side)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -164,7 +175,7 @@ class State:
         )
 
     def forget_collection(self, collection: str) -> None:
-        for table in ("last_known", "quarantine"):
+        for table in ("last_known", "quarantine", "listing_cache"):
             self.db.execute(f"DELETE FROM {table} WHERE collection=?", (collection,))
         self.db.execute("DELETE FROM pair WHERE collection=?", (collection,))
 
@@ -294,6 +305,29 @@ class State:
         self.db.execute(
             "DELETE FROM journal WHERE ts < ?", (time.time() - keep_days * 86400,)
         )
+
+    # -- listing cache --------------------------------------------------------
+
+    def cached_listing(self, collection: str, side: str, signature: str, max_age: float) -> list[dict] | None:
+        row = self.db.execute(
+            "SELECT signature, ts, items FROM listing_cache WHERE collection=? AND side=?",
+            (collection, side),
+        ).fetchone()
+        if not row or row["signature"] != signature or time.time() - row["ts"] > max_age:
+            return None
+        return json.loads(row["items"])
+
+    def store_listing(self, collection: str, side: str, signature: str, items: list[dict]) -> None:
+        self.db.execute(
+            """INSERT INTO listing_cache (collection, side, signature, ts, items)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(collection, side) DO UPDATE SET
+                   signature=excluded.signature, ts=excluded.ts, items=excluded.items""",
+            (collection, side, signature, time.time(), json.dumps(items)),
+        )
+
+    def drop_listing(self, collection: str, side: str) -> None:
+        self.db.execute("DELETE FROM listing_cache WHERE collection=? AND side=?", (collection, side))
 
     # -- meta ---------------------------------------------------------------
 

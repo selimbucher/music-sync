@@ -4,7 +4,7 @@ from music_sync.config import Config
 from music_sync.models import APPLE, SPOTIFY
 from music_sync.state import State
 from music_sync.sync import LIKED, Engine
-from tests.fakes import Fake, world
+from tests.fakes import Fake, world, writes
 
 
 @pytest.fixture
@@ -114,7 +114,7 @@ def test_dry_run_writes_nothing(env):
     apple.liked_ = ["am-a"]
     e = engine(env, dry=True)
     e.seed()
-    assert spotify.liked_ == [] and not spotify.calls
+    assert spotify.liked_ == [] and not writes(spotify)
     assert not st.is_seeded(LIKED)
     assert e.outcomes[0].plan.add[SPOTIFY] == {"track:ISRC-A"}
 

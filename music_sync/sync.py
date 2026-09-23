@@ -9,20 +9,24 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from . import match, merge
 from .match import _duration_ok
 from .config import Config
 from .merge import Abort, Guard, Mode, Plan
 from .models import ALBUM, APPLE, SPOTIFY, TRACK, Item, other_side
-from .providers.base import AuthError, Listing, PlaylistRef, Provider, Throttled
+from .providers.base import AuthError, Listing, PlaylistRef, Provider, SearchQuota, Throttled
 from .state import State
 
 log = logging.getLogger(__name__)
 
 LIKED = "liked"
 ALBUMS = "albums"
+
+# A cached Spotify listing is trusted while its signature is unchanged and it
+# is younger than this; after that a full listing is taken regardless.
+CACHE_MAX_AGE_S = 6 * 3600
 
 
 def stable_id(item: Item) -> str:
@@ -40,6 +44,8 @@ class Outcome:
     plan: Plan | None = None
     applied: dict[str, set[str]] = field(default_factory=lambda: {APPLE: set(), SPOTIFY: set()})
     quarantined: list[str] = field(default_factory=list)
+    # adds that need a search while the search quota is exhausted; retried next run
+    deferred: list[str] = field(default_factory=list)
     skipped: str | None = None
     # side -> descriptions of items planned for removal (dry runs show them)
     removals: dict[str, list[str]] = field(default_factory=lambda: {APPLE: [], SPOTIFY: []})
@@ -52,6 +58,7 @@ class Outcome:
         c = self.plan.counts()
         q = f", {len(self.quarantined)} unmatched" if self.quarantined else ""
         b = f", {len(self.plan.blocked)} in backoff" if self.plan.blocked else ""
+        b += f", {len(self.deferred)} deferred (search quota)" if self.deferred else ""
         return (
             f"{self.label}: apple +{len(self.applied[APPLE])}/{c['add_apple']} -{c['del_apple']}, "
             f"spotify +{len(self.applied[SPOTIFY])}/{c['add_spotify']} -{c['del_spotify']}{q}{b}"
@@ -67,6 +74,7 @@ class Engine:
         self.outcomes: list[Outcome] = []
         self.needs_review: list[str] = []
         self._code_cache: dict[tuple[str, str], list[Item]] = {}
+        self._snapshots: dict[str, str | None] = {}   # spotify playlist id -> snapshot
 
     def side(self, name: str) -> Provider:
         return self.apple if name == APPLE else self.spotify
@@ -126,14 +134,35 @@ class Engine:
     def _pair_row(self, key: str):
         return self.state.db.execute("SELECT * FROM pair WHERE collection=?", (key,)).fetchone()
 
+    def _signature(self, key: str, side: str) -> str | None:
+        """Cheap change signal for a Spotify collection, or None."""
+        if side != SPOTIFY:
+            return None
+        if key == LIKED:
+            return self.spotify.liked_signature()
+        if key == ALBUMS:
+            return None
+        return self._snapshots.get(self._pair_row(key)["spotify_id"])
+
     def _listing(self, key: str, side: str) -> Listing:
         prov = self.side(side)
+        sig = self._signature(key, side)
+        if sig:
+            cached = self.state.cached_listing(key, side, sig, CACHE_MAX_AGE_S)
+            if cached is not None:
+                return Listing(items=[Item(**d) for d in cached], complete=True)
         if key == LIKED:
-            return prov.liked()
-        if key == ALBUMS:
-            return prov.albums()
-        row = self._pair_row(key)
-        return prov.playlist_items(row["apple_id"] if side == APPLE else row["spotify_id"])
+            listing = prov.liked()
+        elif key == ALBUMS:
+            listing = prov.albums()
+        else:
+            row = self._pair_row(key)
+            listing = prov.playlist_items(row["apple_id"] if side == APPLE else row["spotify_id"])
+        if sig and listing.complete:
+            self.state.store_listing(key, side, sig, [asdict(i) for i in listing.items])
+        elif side == SPOTIFY:
+            self.state.drop_listing(key, side)
+        return listing
 
     # -- playlist pairing -----------------------------------------------------
 
@@ -143,6 +172,7 @@ class Engine:
             return
         apple = {p.native_id: p for p in self.apple.playlists() if p.editable}
         spotify = {p.native_id: p for p in self.spotify.playlists() if p.editable}
+        self._snapshots = {p.native_id: p.snapshot for p in spotify.values()}
         known = [r for r in self.state.pairs() if r["collection"].startswith("pl:")]
 
         # 1. Existing pairs: deletion on one side, renames.
@@ -259,7 +289,8 @@ class Engine:
             self._code_cache[k] = self.spotify.lookup_codes(kind, [code]).get(code, [])
         return self._code_cache[k]
 
-    def _reconcile(self, key: str, kind: str, a_items: list[Item], s_items: list[Item]) -> dict[str, str]:
+    def _reconcile(self, key: str, kind: str, a_items: list[Item], s_items: list[Item],
+                   seed: bool = False) -> dict[str, str]:
         """Spotify native id -> identity, for every Spotify item we can pin.
 
         Known mappings come from state. Unknown ones are tried against Apple
@@ -284,8 +315,14 @@ class Engine:
             if len(cands) == 1:
                 chosen = cands[0]
             else:
-                chosen = next((c for c in cands
-                               if any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
+                try:
+                    chosen = next((c for c in cands
+                                   if any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
+                except SearchQuota as e:
+                    if seed:
+                        # Guessing here could remove the wrong edition; wait for the quota.
+                        raise Abort(f"ambiguous match for {it.describe()!r} needs a search: {e}") from e
+                    chosen = None  # stays provisional: an add to defer, never a removal
             if chosen is None:
                 continue
             identity = match.identity_of(chosen)
@@ -307,7 +344,7 @@ class Engine:
             s_items = ls.items
 
             a_by = {match.identity_of(it): it for it in a_items}
-            s_ids = self._reconcile(key, kind, a_items, s_items)
+            s_ids = self._reconcile(key, kind, a_items, s_items, seed=(mode == Mode.SEED))
             s_by = {s_ids.get(it.native_id) or match.identity_of(it): it for it in s_items}
 
             if mode == Mode.SEED:
@@ -367,6 +404,7 @@ class Engine:
             return
         try:
             self.side(mirror).replace_playlist_items(self._pair_row(key)[f"{mirror}_id"], target)
+            self.state.drop_listing(key, mirror)
             self.log("reorder", collection=key, side=mirror, label=label, detail=len(target))
         except NotImplementedError as e:
             self.needs_review.append(f"{label}: {e}")
@@ -388,7 +426,11 @@ class Engine:
                 it = Item(kind=kind, side=side, native_id=known, title=origin.title, artist=origin.artist)
                 resolved.append((identity, it.with_catalog(known) if side == APPLE else it))
                 continue
-            m = match.resolve(origin, self.apple, self.spotify)
+            try:
+                m = match.resolve(origin, self.apple, self.spotify)
+            except SearchQuota:
+                out.deferred.append(origin.describe())
+                continue
             if not m:
                 reason = "no catalog id" if (origin.side == APPLE and not origin.catalog_id) else "no confident match"
                 self.state.quarantine(key, identity, side, origin.describe(), reason)
@@ -421,6 +463,7 @@ class Engine:
             self.needs_review.append(f"{plan.label}: add on {side} failed: {e}")
             self.log("add_failed", collection=key, side=side, detail=str(e))
             return
+        self.state.drop_listing(key, side)
         for identity, it in resolved:
             out.applied[side].add(identity)
             self.state.clear_quarantine(key, identity, side)
@@ -443,6 +486,7 @@ class Engine:
             self.needs_review.append(f"{plan.label}: remove on {side} failed: {e}")
             self.log("remove_failed", collection=key, side=side, detail=str(e))
             return
+        self.state.drop_listing(key, side)
         for it in items:
             self.log("remove", collection=key, side=side, label=it.describe())
 

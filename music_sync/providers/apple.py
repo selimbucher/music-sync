@@ -246,7 +246,14 @@ class Apple:
                              keep=lambda row: bool(row.get("attributes", {}).get("inFavorites")))
 
     def albums(self) -> Listing:
-        return self._listing("/me/library/albums", ALBUM, self._LIB)
+        """Starred albums. The library-albums list itself is derived (every
+        album a single library song came from), so the star is the only
+        signal that means "saved"."""
+        return self._listing("/me/library/albums", ALBUM, self._LIB,
+                             keep=lambda row: bool(row.get("attributes", {}).get("inFavorites")))
+
+    def liked_signature(self) -> str | None:
+        return None  # no cheap change signal on Apple; always list
 
     # -- matching primitives ------------------------------------------------
 
@@ -369,10 +376,19 @@ class Apple:
             self._req("DELETE", f"/me/ratings/songs/{cid}", ok=(200, 204, 404))
 
     def save_albums(self, items: list[Item]) -> None:
+        """Star the album (which also puts it in the library)."""
         ids = [it.catalog_id or it.native_id for it in items]
         for i in range(0, len(ids), ADD_BATCH):
-            self._req("POST", "/me/library", params={"ids[albums]": ",".join(ids[i:i + ADD_BATCH])})
+            self._req("POST", "/me/favorites", params={"ids[albums]": ",".join(ids[i:i + ADD_BATCH])})
 
     def unsave_albums(self, items: list[Item]) -> None:
+        """Unstar; the library entry stays, as in the app."""
         for it in items:
-            self._req("DELETE", f"/me/library/albums/{it.native_id}")
+            cid = it.catalog_id or it.native_id
+            r = self.http.request("DELETE", f"{AMP}/me/favorites", headers=self._headers(),
+                                  params={"ids[albums]": cid}, timeout=TIMEOUT)
+            if r.status_code in (200, 202, 204):
+                continue
+            if r.status_code in (401, 403):
+                raise AuthError(f"apple: {r.status_code} on DELETE /me/favorites")
+            self._req("DELETE", f"/me/ratings/albums/{cid}", ok=(200, 204, 404))

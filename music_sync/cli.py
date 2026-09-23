@@ -39,7 +39,7 @@ def _providers(cfg: Config, state: State) -> tuple[Apple, Spotify]:
         sys.exit("missing configuration:\n  " + "\n  ".join(missing))
     return (
         Apple(cfg.apple_user_token, state, cfg.apple_storefront, liked_mode=cfg.apple_liked),
-        Spotify(cfg.spotify_client_id, cfg.spotify_client_secret, cfg.spotify_refresh_token_file),
+        Spotify(cfg.spotify_client_id, cfg.spotify_client_secret, cfg.spotify_refresh_token_file, state=state),
     )
 
 
@@ -116,9 +116,11 @@ def _status(args, cfg: Config) -> int:
         import json
         exp = json.loads(dev)["exp"]
         print(f"apple developer token: expires {time.strftime('%Y-%m-%d', time.gmtime(exp))}")
-    until = float(state.get_meta("apple_throttled_until", "0") or 0)
-    if until > time.time():
-        print(f"apple: throttled until {time.strftime('%H:%M', time.localtime(until))}")
+    for key, label in (("apple_throttled_until", "apple"), ("spotify_throttled_until", "spotify"),
+                       ("spotify_search_throttled_until", "spotify search")):
+        until = float(state.get_meta(key, "0") or 0)
+        if until > time.time():
+            print(f"{label}: throttled until {time.strftime('%Y-%m-%d %H:%M', time.localtime(until))}")
     print("collections:")
     for r in state.pairs():
         print(f"  {r['label']:<32} seeded={bool(r['seeded'])} last_known={len(state.last_known(r['collection']))}")

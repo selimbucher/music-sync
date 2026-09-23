@@ -61,13 +61,19 @@ class Fake:
             raise AuthError(f"{self.side}: dead")
 
     def playlists(self):
-        return [PlaylistRef(pid, p["name"]) for pid, p in self.playlists_.items()]
+        return [PlaylistRef(pid, p["name"], snapshot=(str(p["items"]) if self.side == SPOTIFY else None))
+                for pid, p in self.playlists_.items()]
 
     def playlist_items(self, pid):
+        self.calls.append(("list_playlist", pid))
         return self._listing(self.playlists_[pid]["items"])
 
     def liked(self):
+        self.calls.append(("list_liked",))
         return self._listing(self.liked_)
+
+    def liked_signature(self):
+        return f"{len(self.liked_)}:{self.liked_[-1] if self.liked_ else None}" if self.side == SPOTIFY else None
 
     def albums(self):
         return Listing(items=[], complete=True)
@@ -151,3 +157,11 @@ class Fake:
 def world(*rows):
     """rows: (isrc, title, artist, duration_ms, apple_catalog_id, spotify_id)"""
     return {r[0]: {"title": r[1], "artist": r[2], "duration_ms": r[3], "apple": r[4], "spotify": r[5]} for r in rows}
+
+
+WRITE_OPS = {"create_playlist", "rename_playlist", "delete_playlist", "add", "remove", "replace", "like", "unlike"}
+
+
+def writes(fake):
+    """Only the calls that changed something on that side."""
+    return [c for c in fake.calls if c[0] in WRITE_OPS]

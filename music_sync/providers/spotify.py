@@ -10,7 +10,12 @@ What changed and why it matters here:
     (query parameter, <= 40 URIs), covering tracks, albums and playlists.
   * A Development Mode app needs its owner on Premium and is capped at
     5 users; both fine for a personal tool.
-  * 429 carries ``Retry-After``; short waits are honoured, long ones abort.
+  * 429 carries ``Retry-After``; short waits are honoured. A long one is the
+    per-account daily quota (``reason: QUOTA_EXCEEDED``): it is persisted so
+    the timer stops calling until it lifts instead of burning a request per
+    run. The quota is why listings are cached: ``snapshot_id`` tells whether
+    a playlist changed, and one ``/me/tracks?limit=1`` fingerprints the liked
+    set, so a quiet run costs a handful of requests rather than ~30.
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from urllib.parse import urlencode
 import requests
 
 from ..models import ALBUM, SPOTIFY, TRACK, Item
-from .base import AuthError, Listing, PlaylistRef, Throttled
+from .base import AuthError, Listing, PlaylistRef, SearchQuota, Throttled
 
 log = logging.getLogger(__name__)
 
@@ -63,9 +68,10 @@ def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: s
 class Spotify:
     side = SPOTIFY
 
-    def __init__(self, client_id: str, client_secret: str, refresh_token_file: Path):
+    def __init__(self, client_id: str, client_secret: str, refresh_token_file: Path, state=None):
         self.client_id, self.client_secret = client_id, client_secret
         self.refresh_file = Path(refresh_token_file)
+        self.state = state
         self.http = requests.Session()
         self._access: str | None = None
         self._expires = 0.0
@@ -96,14 +102,39 @@ class Spotify:
             self._refresh()
         return {"Authorization": f"Bearer {self._access}", "Content-Type": "application/json"}
 
+    @staticmethod
+    def _is_search(path: str) -> bool:
+        return "/search" in path
+
+    def _check_quota(self, path: str) -> None:
+        if not self.state:
+            return
+        key = "spotify_search_throttled_until" if self._is_search(path) else "spotify_throttled_until"
+        until = float(self.state.get_meta(key, "0") or 0)
+        if until > time.time():
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(until))
+            if self._is_search(path):
+                raise SearchQuota(f"spotify: search quota exhausted until {when}")
+            raise Throttled(f"spotify: quota exhausted until {when}")
+
     def _req(self, method: str, path: str, ok=(200, 201, 202, 204), **kw) -> requests.Response:
+        self._check_quota(path)
         url = path if path.startswith("http") else API + path
         for attempt in range(3):
             r = self.http.request(method, url, headers=self._headers(), timeout=TIMEOUT, **kw)
             if r.status_code == 429:
                 wait = int(r.headers.get("Retry-After", "5"))
                 if wait > MAX_WAIT_S:
-                    raise Throttled(f"spotify: 429, retry-after {wait}s")
+                    reason = ""
+                    try:
+                        reason = r.json().get("error", {}).get("reason") or r.json().get("reason") or ""
+                    except ValueError:
+                        pass
+                    key = "spotify_search_throttled_until" if self._is_search(path) else "spotify_throttled_until"
+                    if self.state:
+                        self.state.set_meta(key, str(time.time() + wait))
+                    exc = SearchQuota if self._is_search(path) else Throttled
+                    raise exc(f"spotify: 429 {reason} on {path}, retry-after {wait}s ({wait // 3600}h)")
                 log.info("spotify 429; sleeping %ss", wait)
                 time.sleep(wait + 1)
                 continue
@@ -178,8 +209,16 @@ class Spotify:
                 native_id=p["id"], name=p.get("name", ""),
                 editable=(p.get("owner") or {}).get("id") == me,
                 description=p.get("description") or "",
+                snapshot=p.get("snapshot_id"),
             ))
         return out
+
+    def liked_signature(self) -> str | None:
+        """Saved tracks are newest-first, so total + newest id changes on any
+        add or remove; a same-count swap still moves the newest id."""
+        body = self._req("GET", "/me/tracks", params={"limit": 1}).json()
+        first = (body.get("items") or [{}])[0].get("track") or {}
+        return f"{body.get('total')}:{first.get('id')}"
 
     def playlist_items(self, playlist_id: str) -> Listing:
         fields = "next,items(is_local,item(id,uri,name,type,duration_ms,artists(name)))"
