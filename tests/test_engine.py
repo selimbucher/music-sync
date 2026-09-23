@@ -201,3 +201,20 @@ def test_sync_before_any_seed_touches_nothing_not_even_playlists(env):
     e.sync()
     assert apple.playlists_ == {} and not apple.calls
     assert e.outcomes[0].skipped
+
+
+def test_cli_force_lifts_guard_for_seed_only(env, monkeypatch):
+    from music_sync import cli
+    import argparse
+    apple, spotify, st, cfg = env
+    ids = [f"am-{c}" for c in "abcde"]
+    apple.liked_ = ["am-a"]; spotify.liked_ = [f"sp-{c}" for c in "abcde"]     # seed would delete 4 of 5
+    monkeypatch.setattr(cli, "State", lambda path: st)
+    monkeypatch.setattr(cli, "_providers", lambda c, s: (apple, spotify))
+    monkeypatch.setattr(cli.notify, "send", lambda *a, **k: False)
+    cfg.notify_email = None
+    monkeypatch.setattr(cli, "Config", lambda: cfg)
+    rc = cli.main(["seed"])
+    assert rc == 2 and sorted(spotify.liked_) == [f"sp-{c}" for c in "abcde"]   # guarded: nothing deleted
+    rc = cli.main(["seed", "--force"])
+    assert rc == 0 and spotify.liked_ == ["sp-a"]

@@ -21,7 +21,7 @@ import urllib.parse
 import webbrowser
 from pathlib import Path
 
-from . import notify
+from . import merge, notify
 from .config import Config
 from .models import APPLE
 from .providers.apple import Apple
@@ -47,6 +47,8 @@ def _run(args, cfg: Config, seed: bool) -> int:
     state = State(cfg.state_path)
     apple, spotify = _providers(cfg, state)
     engine = Engine(apple, spotify, state, cfg, dry_run=args.dry_run)
+    if seed and getattr(args, "force", False):
+        engine.guard = merge.Guard(max_delete_ratio=1.0, max_delete_count=10**9)
     try:
         if seed:
             engine.seed(master=APPLE, prune_playlists=not args.keep_extra_playlists)
@@ -160,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--keep-extra-playlists", action="store_true",
                    help="leave playlists that exist only on Spotify (default: delete them, so Spotify matches exactly)")
+    s.add_argument("--force", action="store_true",
+                   help="lift the mass-deletion guard for this run; use only after `seed --dry-run` listed every removal")
 
     y = sub.add_parser("sync")
     y.add_argument("--dry-run", action="store_true")

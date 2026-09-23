@@ -96,6 +96,7 @@ and add `"music-sync.service"` to its `before` list.
 # on the server; runs with the service's credentials and environment
 sudo music-sync-admin seed --dry-run     # lists every add, removal, playlist deletion and reorder
 sudo music-sync-admin seed               # Spotify := Apple Music exactly, incl. track order
+# --force            when the dry run showed a collection losing >20% / >50 items and that is intended
 # --keep-extra-playlists to leave Spotify-only playlists in place
 ```
 
