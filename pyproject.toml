@@ -1,0 +1,19 @@
+[project]
+name = "music-sync"
+version = "0.1.0"
+description = "Bidirectional Apple Music <-> Spotify sync with deletion safety"
+requires-python = ">=3.11"
+dependencies = ["requests"]
+
+[project.scripts]
+music-sync = "music_sync.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["music_sync*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
