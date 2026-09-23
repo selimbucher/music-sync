@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from . import match, merge
+from .match import _duration_ok
 from .config import Config
 from .merge import Abort, Guard, Mode, Plan
 from .models import ALBUM, APPLE, SPOTIFY, TRACK, Item, other_side
@@ -260,10 +261,12 @@ class Engine:
         """Spotify native id -> identity, for every Spotify item we can pin.
 
         Known mappings come from state. Unknown ones are tried against Apple
-        items with the same fuzzy key, and accepted only when the Apple code
-        round-trips through Spotify's code search to this very Spotify id.
-        Without this, a first seed would read every unmapped Spotify track as
-        "absent from Apple" and remove it.
+        items with the same artist+title within duration tolerance: accepted
+        when the Apple code round-trips through Spotify's code search to this
+        very Spotify id, or, failing that, when the candidate is unique. A
+        wrong acceptance here only keeps Spotify's edition of a song; a wrong
+        rejection removes and re-adds it. Without this step a first seed would
+        read every unmapped Spotify track as "absent from Apple" and remove it.
         """
         ids = self.state.identities_for(SPOTIFY, [it.native_id for it in s_items])
         by_fuzzy: dict[str, list[Item]] = {}
@@ -273,14 +276,18 @@ class Engine:
         for it in s_items:
             if it.native_id in ids:
                 continue
-            for cand in by_fuzzy.get(it.fuzzy_key, []):
-                if any(b.native_id == it.native_id for b in self._lookup(kind, cand.code)):
-                    identity = match.identity_of(cand)
-                    ids[it.native_id] = identity
-                    if not self.dry:
-                        self.state.remember_identity(identity, kind, SPOTIFY, it.native_id, it.describe())
-                        self.state.remember_identity(identity, kind, APPLE, stable_id(cand), it.describe())
-                    break
+            cands = [c for c in by_fuzzy.get(it.fuzzy_key, []) if _duration_ok(it, c)]
+            chosen = next((c for c in cands
+                           if any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
+            if chosen is None and len(cands) == 1:
+                chosen = cands[0]
+            if chosen is None:
+                continue
+            identity = match.identity_of(chosen)
+            ids[it.native_id] = identity
+            if not self.dry:
+                self.state.remember_identity(identity, kind, SPOTIFY, it.native_id, it.describe())
+                self.state.remember_identity(identity, kind, APPLE, stable_id(chosen), it.describe())
         return ids
 
     # -- one collection -------------------------------------------------------

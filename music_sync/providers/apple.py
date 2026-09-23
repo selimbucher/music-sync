@@ -8,12 +8,11 @@ developer token embedded in music.apple.com's JS bundle (``iss: AMPWebPlay``,
 one). Every request carries ``Origin: https://music.apple.com`` because the
 token is origin-bound. Never send ``x-apple-client-version``: amp-api 500s.
 
-"Liked songs" maps to Apple **Favorites** (the star), not "in library": the
-library also holds every track of every saved album, which would flood
-Spotify's Liked Songs. Favorites are read by paging the library with the
-documented ``inFavorites`` attribute, written with the documented
-``POST /me/favorites``, and removed via ``DELETE /me/favorites`` with the
-ratings endpoint as fallback (the delete is not in the public docs).
+"Liked songs" is either the library (Add to Library, +; ``liked_mode``
+"library") or Favorites (the star; "favorites"). Favorites are read by paging
+the library with the documented ``inFavorites`` attribute, written with the
+documented ``POST /me/favorites``, and removed via ``DELETE /me/favorites``
+with the ratings endpoint as fallback (the delete is not in the public docs).
 
 Quirks handled below:
   * ``GET .../playlists/{id}/tracks`` is 404 for an empty playlist.
@@ -89,9 +88,12 @@ def harvest_developer_token(session: requests.Session | None = None) -> tuple[st
 class Apple:
     side = APPLE
 
-    def __init__(self, user_token: str, state, storefront: str | None = None):
+    def __init__(self, user_token: str, state, storefront: str | None = None, liked_mode: str = "library"):
+        if liked_mode not in ("library", "favorites"):
+            raise ValueError(f"liked_mode must be library or favorites, not {liked_mode!r}")
         self.user_token = user_token.strip()
         self.state = state
+        self.liked_mode = liked_mode
         self.http = requests.Session()
         self._storefront = storefront
         self._dev: str | None = None
@@ -151,13 +153,18 @@ class Apple:
 
     # -- paging -------------------------------------------------------------
 
+    # Apple's ``next`` link keeps offset/limit but drops these, so they must be
+    # re-sent on every page or only the first 100 rows carry catalog data.
+    _CARRY = ("include", "extend")
+
     def _pages(self, path: str, params: dict | None = None):
         """Yield ``data`` rows across ``next`` links. Raises on any failure so
         the caller marks the listing incomplete rather than short."""
         url: str | None = path
         first = True
+        carry = {k: v for k, v in (params or {}).items() if k in self._CARRY}
         while url:
-            r = self._req("GET", url, ok=(200, 404), params=params if first else None)
+            r = self._req("GET", url, ok=(200, 404), params=params if first else (carry or None))
             first = False
             if r.status_code == 404:
                 return  # empty relationship
@@ -233,7 +240,8 @@ class Apple:
         return lst
 
     def liked(self) -> Listing:
-        """Favorites: library songs whose ``inFavorites`` is set."""
+        if self.liked_mode == "library":
+            return self._listing("/me/library/songs", TRACK, self._LIB)
         return self._listing("/me/library/songs", TRACK, self._LIB,
                              keep=lambda row: bool(row.get("attributes", {}).get("inFavorites")))
 
@@ -334,13 +342,21 @@ class Apple:
         raise NotImplementedError("Apple Music exposes no reorder; order is only mirrored onto Spotify")
 
     def like(self, items: list[Item]) -> None:
-        """Favorite (star). Apple adds favorited songs to the library itself."""
         ids = [it.catalog_id or it.native_id for it in items]
+        if self.liked_mode == "library":
+            for i in range(0, len(ids), ADD_BATCH):
+                self._req("POST", "/me/library", params={"ids[songs]": ",".join(ids[i:i + ADD_BATCH])})
+            return
+        # Favorite (star). Apple adds favorited songs to the library itself.
         for i in range(0, len(ids), ADD_BATCH):
             self._req("POST", "/me/favorites", params={"ids[songs]": ",".join(ids[i:i + ADD_BATCH])})
 
     def unlike(self, items: list[Item]) -> None:
-        """Unfavorite. The library entry stays, as it does in the app."""
+        if self.liked_mode == "library":
+            for it in items:
+                self._req("DELETE", f"/me/library/songs/{it.native_id}")
+            return
+        # Unfavorite. The library entry stays, as it does in the app.
         for it in items:
             cid = it.catalog_id or it.native_id
             r = self.http.request("DELETE", f"{AMP}/me/favorites", headers=self._headers(),

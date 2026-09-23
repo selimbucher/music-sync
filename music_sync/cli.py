@@ -38,7 +38,7 @@ def _providers(cfg: Config, state: State) -> tuple[Apple, Spotify]:
     if missing:
         sys.exit("missing configuration:\n  " + "\n  ".join(missing))
     return (
-        Apple(cfg.apple_user_token, state, cfg.apple_storefront),
+        Apple(cfg.apple_user_token, state, cfg.apple_storefront, liked_mode=cfg.apple_liked),
         Spotify(cfg.spotify_client_id, cfg.spotify_client_secret, cfg.spotify_refresh_token_file),
     )
 

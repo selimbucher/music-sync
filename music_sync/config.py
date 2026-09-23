@@ -39,6 +39,11 @@ class Config:
     spotify_refresh_token_file: Path | None = field(default_factory=lambda: Path(os.environ["MUSIC_SYNC_SPOTIFY_REFRESH_TOKEN_FILE"]) if os.environ.get("MUSIC_SYNC_SPOTIFY_REFRESH_TOKEN_FILE") else None)
     spotify_redirect_uri: str = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8765/callback"))
 
+    # What Spotify "Liked Songs" means on Apple: "library" (Add to Library, +)
+    # or "favorites" (the star). Selim's Apple library and Spotify likes were
+    # already the same set, so library is the default.
+    apple_liked: str = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_APPLE_LIKED", "library"))
+
     sync_playlists: bool = field(default_factory=lambda: _env_bool("MUSIC_SYNC_PLAYLISTS", True))
     sync_liked: bool = field(default_factory=lambda: _env_bool("MUSIC_SYNC_LIKED", True))
     sync_albums: bool = field(default_factory=lambda: _env_bool("MUSIC_SYNC_ALBUMS", True))

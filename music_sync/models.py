@@ -94,11 +94,10 @@ class Item:
 
     @property
     def fuzzy_key(self) -> str:
-        """Fallback identity. Duration is bucketed to 2s to absorb rounding."""
-        base = f"{normalize(primary_artist(self.artist))}|{normalize(self.title)}"
-        if self.kind == TRACK and self.duration_ms:
-            base += f"|{round(self.duration_ms / 2000)}"
-        return base
+        """Fallback identity: primary artist + title. Duration is checked
+        separately with a tolerance; bucketing it here split near-boundary
+        pairs of the same recording."""
+        return f"{normalize(primary_artist(self.artist))}|{normalize(self.title)}"
 
     def describe(self) -> str:
         if self.kind == ARTIST:

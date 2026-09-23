@@ -5,7 +5,7 @@ Bidirectional Apple Music <-> Spotify sync. Deletions propagate both ways. First
 | Spotify | Apple Music |
 |---|---|
 | Playlists | Playlists |
-| Liked Songs | Favorite Songs (the star) — not "in library" |
+| Liked Songs | Library songs (+) by default; `appleLiked = "favorites"` for the star instead |
 | Saved albums | Library albums |
 
 ## Prerequisites

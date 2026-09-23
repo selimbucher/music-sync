@@ -46,6 +46,11 @@
               type = lib.types.path;
               description = "Written by `music-sync auth spotify`; the service must be able to rewrite it on rotation.";
             };
+            appleLiked = lib.mkOption {
+              type = lib.types.enum [ "library" "favorites" ];
+              default = "library";
+              description = "What Spotify's Liked Songs are on Apple Music: the library (+) or Favorites (the star).";
+            };
             notifyEmail = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; };
             notifyFrom = lib.mkOption { type = lib.types.str; default = "music-sync@${config.networking.hostName}"; };
             after = lib.mkOption {
@@ -69,6 +74,7 @@
               # Rewritten on rotation, so it lives in the state dir, not in credentials.
               MUSIC_SYNC_SPOTIFY_REFRESH_TOKEN_FILE = toString cfg.spotifyRefreshTokenFile;
               MUSIC_SYNC_NOTIFY_FROM = cfg.notifyFrom;
+              MUSIC_SYNC_APPLE_LIKED = cfg.appleLiked;
             } // lib.optionalAttrs (cfg.notifyEmail != null) { MUSIC_SYNC_NOTIFY_EMAIL = cfg.notifyEmail; }
               // cfg.extraEnvironment;
             hardening = {
