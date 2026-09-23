@@ -25,8 +25,9 @@ from .providers.base import Provider
 
 log = logging.getLogger(__name__)
 
-# Two catalog entries of the same recording rarely differ by more than this.
-DURATION_TOLERANCE_MS = 3000
+# The two services report the same recording a few seconds apart at times;
+# a different edit or a live take differs by far more.
+DURATION_TOLERANCE_MS = 5000
 
 
 @dataclass

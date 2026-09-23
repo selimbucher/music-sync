@@ -20,31 +20,30 @@ def other_side(side: str) -> str:
 
 _PAREN = re.compile(r"\s*[\(\[][^)\]]*[\)\]]\s*")
 _FEAT = re.compile(r"\s*(?:feat\.?|ft\.?|featuring|with)\s+.*$", re.I)
-_NOISE = re.compile(
-    r"\s*-\s*(?:\d{4}\s+)?(?:remaster(?:ed)?|remix|mono|stereo|deluxe|"
-    r"radio edit|single version|album version|bonus track|live)\b.*$",
-    re.I,
-)
-_NONWORD = re.compile(r"[^\w\s]", re.UNICODE)
-_SPACE = re.compile(r"\s+")
+# Spotify writes version tags as "Title - Supertaste Remix"; Apple as
+# "Title (Supertaste Remix)". Both go, and the duration check decides.
+_DASH_TAIL = re.compile(r"\s+[-\u2013\u2014]\s+.*$")
+_THE = re.compile(r"^the\s+", re.I)
+_NONALNUM = re.compile(r"[^0-9a-z]+")
 
 
 def normalize(text: str) -> str:
-    """Fold a title/artist to a comparable form.
+    """Fold a title/artist to a comparable core.
 
-    Strips parentheticals, featured-artist tails and remaster/edition noise,
-    then accents and punctuation. Used only for the fuzzy fallback; ISRC/UPC
-    matching never goes through here.
+    Strips accents, parentheticals, " - version" tails, featured-artist tails,
+    a leading "The", then everything that is not a letter or digit (so
+    "Star-Crossed" == "Starcrossed"). Used only for candidate selection;
+    ISRC/UPC matching never goes through here.
     """
     if not text:
         return ""
     out = unicodedata.normalize("NFKD", text)
     out = "".join(c for c in out if not unicodedata.combining(c))
     out = _PAREN.sub(" ", out)
-    out = _NOISE.sub("", out)
+    out = _DASH_TAIL.sub("", out)
     out = _FEAT.sub("", out)
-    out = _NONWORD.sub(" ", out)
-    return _SPACE.sub(" ", out).strip().lower()
+    out = _THE.sub("", out.strip())
+    return _NONALNUM.sub("", out.lower())
 
 
 def primary_artist(artist: str) -> str:

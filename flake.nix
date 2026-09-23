@@ -46,6 +46,13 @@
               type = lib.types.path;
               description = "Written by `music-sync auth spotify`; the service must be able to rewrite it on rotation.";
             };
+            syncPlaylists = lib.mkOption { type = lib.types.bool; default = true; };
+            syncLiked = lib.mkOption { type = lib.types.bool; default = true; };
+            syncAlbums = lib.mkOption {
+              type = lib.types.bool;
+              default = true;
+              description = "Apple's library albums include every album a single liked song came from; off unless the star is used for albums.";
+            };
             appleLiked = lib.mkOption {
               type = lib.types.enum [ "library" "favorites" ];
               default = "library";
@@ -75,6 +82,9 @@
               MUSIC_SYNC_SPOTIFY_REFRESH_TOKEN_FILE = toString cfg.spotifyRefreshTokenFile;
               MUSIC_SYNC_NOTIFY_FROM = cfg.notifyFrom;
               MUSIC_SYNC_APPLE_LIKED = cfg.appleLiked;
+              MUSIC_SYNC_PLAYLISTS = lib.boolToString cfg.syncPlaylists;
+              MUSIC_SYNC_LIKED = lib.boolToString cfg.syncLiked;
+              MUSIC_SYNC_ALBUMS = lib.boolToString cfg.syncAlbums;
             } // lib.optionalAttrs (cfg.notifyEmail != null) { MUSIC_SYNC_NOTIFY_EMAIL = cfg.notifyEmail; }
               // cfg.extraEnvironment;
             hardening = {

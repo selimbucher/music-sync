@@ -41,6 +41,8 @@ class Outcome:
     applied: dict[str, set[str]] = field(default_factory=lambda: {APPLE: set(), SPOTIFY: set()})
     quarantined: list[str] = field(default_factory=list)
     skipped: str | None = None
+    # side -> descriptions of items planned for removal (dry runs show them)
+    removals: dict[str, list[str]] = field(default_factory=lambda: {APPLE: [], SPOTIFY: []})
 
     def line(self) -> str:
         if self.skipped:
@@ -324,6 +326,8 @@ class Engine:
             self.guard.check(plan, {APPLE: len(a_by), SPOTIFY: len(s_by)})
             merge.suppress_quarantined(plan, self.state, key)
             out.plan = plan
+            for side, own in ((APPLE, a_by), (SPOTIFY, s_by)):
+                out.removals[side] = sorted(own[i].describe() for i in plan.remove[side] if i in own)
             aliases: dict[str, str] = {}
             if not self.dry:
                 if not plan.empty:
@@ -462,7 +466,12 @@ class Engine:
 
     def report(self) -> str:
         lines = [f"run {self.run}{' (dry run)' if self.dry else ''}"]
-        lines += ["  " + o.line() for o in self.outcomes]
+        for o in self.outcomes:
+            lines.append("  " + o.line())
+            if self.dry:
+                for side in (APPLE, SPOTIFY):
+                    for name in o.removals[side]:
+                        lines.append(f"      - {side}: {name}")
         if self.needs_review:
             lines.append("needs review:")
             lines += ["  - " + r for r in self.needs_review]
