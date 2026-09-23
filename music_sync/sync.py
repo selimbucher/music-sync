@@ -263,12 +263,14 @@ class Engine:
         """Spotify native id -> identity, for every Spotify item we can pin.
 
         Known mappings come from state. Unknown ones are tried against Apple
-        items with the same artist+title within duration tolerance: accepted
-        when the Apple code round-trips through Spotify's code search to this
-        very Spotify id, or, failing that, when the candidate is unique. A
-        wrong acceptance here only keeps Spotify's edition of a song; a wrong
-        rejection removes and re-adds it. Without this step a first seed would
-        read every unmapped Spotify track as "absent from Apple" and remove it.
+        items with the same artist+title within duration tolerance: a unique
+        candidate is accepted outright; several candidates are settled by
+        round-tripping each Apple code through Spotify's code search to this
+        very Spotify id. Searches count against Spotify's daily quota, so they
+        are spent only on the ambiguous cases. A wrong acceptance here only
+        keeps Spotify's edition of a song; a wrong rejection removes and
+        re-adds it. Without this step a first seed would read every unmapped
+        Spotify track as "absent from Apple" and remove it.
         """
         ids = self.state.identities_for(SPOTIFY, [it.native_id for it in s_items])
         by_fuzzy: dict[str, list[Item]] = {}
@@ -279,10 +281,11 @@ class Engine:
             if it.native_id in ids:
                 continue
             cands = [c for c in by_fuzzy.get(it.fuzzy_key, []) if _duration_ok(it, c)]
-            chosen = next((c for c in cands
-                           if any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
-            if chosen is None and len(cands) == 1:
+            if len(cands) == 1:
                 chosen = cands[0]
+            else:
+                chosen = next((c for c in cands
+                               if any(b.native_id == it.native_id for b in self._lookup(kind, c.code))), None)
             if chosen is None:
                 continue
             identity = match.identity_of(chosen)
