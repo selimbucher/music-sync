@@ -94,7 +94,7 @@ def _auth_spotify(args, cfg: Config) -> int:
             pass
 
     srv = http.server.HTTPServer((parsed.hostname or "127.0.0.1", parsed.port or 80), Handler)
-    print("open this URL in a browser on this machine:\n\n  " + url + "\n")
+    print("open this URL in a browser on this machine:\n\n  " + url + "\n", flush=True)
     webbrowser.open(url)
     srv.handle_request()
     if got.get("state") != state_token or "code" not in got:

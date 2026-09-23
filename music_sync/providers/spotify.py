@@ -53,7 +53,10 @@ def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: s
     r = requests.post(ACCOUNTS + "/api/token", data={
         "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
     }, auth=(client_id, client_secret), timeout=TIMEOUT)
-    r.raise_for_status()
+    if r.status_code != 200:
+        # Spotify says why: invalid_client = id/secret wrong, invalid_grant =
+        # code used/expired or redirect_uri differs from the registered one.
+        raise SystemExit(f"token exchange failed: HTTP {r.status_code} {r.text[:300]}")
     return r.json()
 
 
