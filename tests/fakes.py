@@ -21,12 +21,14 @@ class Fake:
         self.world = world
         self.playlists_: dict[str, dict] = {}   # id -> {name, items: [native ids]}
         self.liked_: list[str] = []
+        self.favorites_: list[str] = []
         self.albums_: list[str] = []
         self.calls: list[tuple] = []
         self.complete = True
         self.dead = False
         self.fail_add = False
         self.ignore: set[str] = set()   # natives accepted but silently dropped, like Apple's 202
+        self.stuck: set[str] = set()    # natives whose removal is accepted but never happens
         self.lag = 0                    # listings that pass before queued writes show up
         self._queued: list = []
 
@@ -89,6 +91,20 @@ class Fake:
         self.calls.append(("list_liked",))
         return self._listing(self.liked_)
 
+    def favorites(self):
+        self.calls.append(("list_favorites",))
+        return self._listing(self.favorites_)
+
+    def favorite(self, items):
+        self._land(self.favorites_, [self._native_of(i) for i in items])
+        self.calls.append(("favorite", [self._native_of(i) for i in items]))
+
+    def unfavorite(self, items):
+        for it in items:
+            if self._native_of(it) not in self.stuck:
+                self.favorites_.remove(self._native_of(it))
+        self.calls.append(("unfavorite", [self._native_of(i) for i in items]))
+
     def liked_signature(self):
         return f"{len(self.liked_)}:{self.liked_[-1] if self.liked_ else None}" if self.side == SPOTIFY else None
 
@@ -145,7 +161,8 @@ class Fake:
 
     def remove_from_playlist(self, pid, items):
         for it in items:
-            self.playlists_[pid]["items"].remove(self._native_of(it))
+            if self._native_of(it) not in self.stuck:
+                self.playlists_[pid]["items"].remove(self._native_of(it))
         self.calls.append(("remove", pid, [self._native_of(i) for i in items]))
 
     def replace_playlist_items(self, pid, items):
@@ -175,7 +192,8 @@ def world(*rows):
     return {r[0]: {"title": r[1], "artist": r[2], "duration_ms": r[3], "apple": r[4], "spotify": r[5]} for r in rows}
 
 
-WRITE_OPS = {"create_playlist", "rename_playlist", "delete_playlist", "add", "remove", "replace", "like", "unlike"}
+WRITE_OPS = {"create_playlist", "rename_playlist", "delete_playlist", "add", "remove", "replace", "like", "unlike",
+             "favorite", "unfavorite"}
 
 
 def writes(fake):

@@ -242,6 +242,12 @@ class Apple:
     def liked(self) -> Listing:
         if self.liked_mode == "library":
             return self._listing("/me/library/songs", TRACK, self._LIB)
+        return self.favorites()
+
+    def favorites(self) -> Listing:
+        """Favourite (★) songs: library songs whose ``inFavorites`` is set.
+        Apple's own "Favourite Songs" playlist is read-only and named in the
+        storefront's language, so the attribute is the reliable source."""
         return self._listing("/me/library/songs", TRACK, self._LIB,
                              keep=lambda row: bool(row.get("attributes", {}).get("inFavorites")))
 
@@ -349,21 +355,26 @@ class Apple:
         raise NotImplementedError("Apple Music exposes no reorder; order is only mirrored onto Spotify")
 
     def like(self, items: list[Item]) -> None:
+        if self.liked_mode == "favorites":
+            return self.favorite(items)
         ids = [it.catalog_id or it.native_id for it in items]
-        if self.liked_mode == "library":
-            for i in range(0, len(ids), ADD_BATCH):
-                self._req("POST", "/me/library", params={"ids[songs]": ",".join(ids[i:i + ADD_BATCH])})
-            return
-        # Favorite (star). Apple adds favorited songs to the library itself.
+        for i in range(0, len(ids), ADD_BATCH):
+            self._req("POST", "/me/library", params={"ids[songs]": ",".join(ids[i:i + ADD_BATCH])})
+
+    def unlike(self, items: list[Item]) -> None:
+        if self.liked_mode == "favorites":
+            return self.unfavorite(items)
+        for it in items:
+            self._req("DELETE", f"/me/library/songs/{it.native_id}")
+
+    def favorite(self, items: list[Item]) -> None:
+        """Star. Apple adds favourited songs to the library itself."""
+        ids = [it.catalog_id or it.native_id for it in items]
         for i in range(0, len(ids), ADD_BATCH):
             self._req("POST", "/me/favorites", params={"ids[songs]": ",".join(ids[i:i + ADD_BATCH])})
 
-    def unlike(self, items: list[Item]) -> None:
-        if self.liked_mode == "library":
-            for it in items:
-                self._req("DELETE", f"/me/library/songs/{it.native_id}")
-            return
-        # Unfavorite. The library entry stays, as it does in the app.
+    def unfavorite(self, items: list[Item]) -> None:
+        """Unstar. The library entry stays, as it does in the app."""
         for it in items:
             cid = it.catalog_id or it.native_id
             r = self.http.request("DELETE", f"{AMP}/me/favorites", headers=self._headers(),

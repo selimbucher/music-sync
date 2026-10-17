@@ -44,6 +44,11 @@ class Config:
     # already the same set, so library is the default.
     apple_liked: str = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_APPLE_LIKED", "library"))
 
+    # A Spotify playlist that mirrors Apple's favourite (★) songs both ways.
+    # Created if missing; empty/unset turns the ★ collection off.
+    spotify_favorites_playlist: str | None = field(
+        default_factory=lambda: os.environ.get("MUSIC_SYNC_SPOTIFY_FAVORITES_PLAYLIST") or None)
+
     sync_playlists: bool = field(default_factory=lambda: _env_bool("MUSIC_SYNC_PLAYLISTS", True))
     sync_liked: bool = field(default_factory=lambda: _env_bool("MUSIC_SYNC_LIKED", True))
     sync_albums: bool = field(default_factory=lambda: _env_bool("MUSIC_SYNC_ALBUMS", True))

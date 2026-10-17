@@ -58,6 +58,11 @@
               default = "library";
               description = "What Spotify's Liked Songs are on Apple Music: the library (+) or Favorites (the star).";
             };
+            spotifyFavoritesPlaylist = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Spotify playlist mirroring Apple Music's favourite (star) songs both ways; created if missing.";
+            };
             notifyEmail = lib.mkOption { type = lib.types.nullOr lib.types.str; default = null; };
             notifyFrom = lib.mkOption { type = lib.types.str; default = "music-sync@${config.networking.hostName}"; };
             after = lib.mkOption {
@@ -85,6 +90,8 @@
               MUSIC_SYNC_PLAYLISTS = lib.boolToString cfg.syncPlaylists;
               MUSIC_SYNC_LIKED = lib.boolToString cfg.syncLiked;
               MUSIC_SYNC_ALBUMS = lib.boolToString cfg.syncAlbums;
+            } // lib.optionalAttrs (cfg.spotifyFavoritesPlaylist != null) {
+              MUSIC_SYNC_SPOTIFY_FAVORITES_PLAYLIST = cfg.spotifyFavoritesPlaylist;
             } // lib.optionalAttrs (cfg.notifyEmail != null) { MUSIC_SYNC_NOTIFY_EMAIL = cfg.notifyEmail; }
               // cfg.extraEnvironment;
             hardening = {

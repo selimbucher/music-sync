@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 LIKED = "liked"
 ALBUMS = "albums"
+FAVS = "favorites"
 
 # A cached Spotify listing is trusted while its signature is unchanged and it
 # is younger than this; after that a full listing is taken regardless.
@@ -76,6 +77,8 @@ class Engine:
         self._code_cache: dict[tuple[str, str], list[Item]] = {}
         self._snapshots: dict[str, str | None] = {}   # spotify playlist id -> snapshot
         self._created: set[str] = set()               # pairs whose playlist was created this run
+        self._sp_pls: dict[str, PlaylistRef] | None = None
+        self._favs_pid: str | None = None             # the Spotify playlist mirroring Apple ★
         self._sleep = time.sleep                      # stubbed in tests
 
     def side(self, name: str) -> Provider:
@@ -102,6 +105,7 @@ class Engine:
         self.spotify.probe()
         if union and not self.dry:
             self.state.set_meta("seed_mode", "union")
+        self._setup_favorites()
         self._pair_playlists(seed_master=None if union else master, prune=False if union else prune_playlists)
         for key, label, kind in self._collections():
             if self.state.is_seeded(key) and key not in self._created:
@@ -121,6 +125,7 @@ class Engine:
             return self.outcomes
         self.apple.probe()
         self.spotify.probe()
+        self._setup_favorites()
         self._pair_playlists(seed_master=None, prune=False)
         union = self.state.get_meta("seed_mode") == "union"
         for key, label, kind in self._collections():
@@ -137,6 +142,10 @@ class Engine:
 
     def _collections(self) -> list[tuple[str, str, str]]:
         out: list[tuple[str, str, str]] = []
+        # ★ first: starring a song on Apple can add it to the library, and
+        # Liked (the library) should then see it in the same run.
+        if self._favs_pid:
+            out.append((FAVS, "Favourites (\u2605)", TRACK))
         if self.cfg.sync_liked:
             self.state.save_pair(LIKED, TRACK, "Liked songs")
             out.append((LIKED, "Liked songs", TRACK))
@@ -160,6 +169,8 @@ class Engine:
             return self.spotify.liked_signature()
         if key == ALBUMS:
             return None
+        if key == FAVS:
+            return self._snapshots.get(self._favs_pid)
         return self._snapshots.get(self._pair_row(key)["spotify_id"])
 
     def _listing(self, key: str, side: str, fresh: bool = False) -> Listing:
@@ -173,6 +184,8 @@ class Engine:
             listing = prov.liked()
         elif key == ALBUMS:
             listing = prov.albums()
+        elif key == FAVS:
+            listing = self.apple.favorites() if side == APPLE else self.spotify.playlist_items(self._favs_pid)
         else:
             row = self._pair_row(key)
             listing = prov.playlist_items(row["apple_id"] if side == APPLE else row["spotify_id"])
@@ -184,13 +197,49 @@ class Engine:
 
     # -- playlist pairing -----------------------------------------------------
 
+    def _spotify_playlists(self) -> dict[str, PlaylistRef]:
+        """The account's own Spotify playlists, listed once per run."""
+        if self._sp_pls is None:
+            self._sp_pls = {p.native_id: p for p in self.spotify.playlists() if p.editable}
+            self._snapshots = {pid: p.snapshot for pid, p in self._sp_pls.items()}
+        return self._sp_pls
+
+    def _setup_favorites(self) -> None:
+        """Find (or create) the Spotify playlist that mirrors Apple's ★ songs."""
+        name = self.cfg.spotify_favorites_playlist
+        if not name:
+            return
+        pls = self._spotify_playlists()
+        row = self._pair_row(FAVS)
+        pid = row["spotify_id"] if row else None
+        if pid and pid not in pls:
+            # Deleting the playlist is not un-starring everything: start over
+            # with a fresh copy instead of mirroring the deletion onto Apple.
+            self.state.forget_collection(FAVS)
+            self.needs_review.append(f"the \u2605 playlist '{row['label']}' is gone from Spotify; recreating it")
+            pid = None
+        if not pid:
+            twin = next((p for p in pls.values() if p.name.strip().lower() == name.strip().lower()), None)
+            if twin:
+                pid = twin.native_id
+            elif self.dry:
+                n = len(self.apple.favorites().items)
+                self.needs_review.append(f"[dry] would create Spotify playlist '{name}' with your {n} \u2605 songs")
+                return
+            else:
+                pid = self.spotify.create_playlist(name, "Apple Music favourites, kept in sync")
+                self._created.add(FAVS)
+                self.log("create_playlist", collection=FAVS, side=SPOTIFY, label=name)
+            self.state.save_pair(FAVS, TRACK, name, None, pid)
+        self._favs_pid = pid
+
     def _pair_playlists(self, seed_master: str | None, prune: bool) -> None:
         """Reconcile the *set* of playlists before any contents are touched."""
         if not self.cfg.sync_playlists:
             return
         apple = {p.native_id: p for p in self.apple.playlists() if p.editable}
-        spotify = {p.native_id: p for p in self.spotify.playlists() if p.editable}
-        self._snapshots = {p.native_id: p.snapshot for p in spotify.values()}
+        # The ★ playlist is its own collection, never a regular pair.
+        spotify = {pid: p for pid, p in self._spotify_playlists().items() if pid != self._favs_pid}
         known = [r for r in self.state.pairs() if r["collection"].startswith("pl:")]
 
         # 1. Existing pairs: deletion on one side, renames.
@@ -555,7 +604,8 @@ class Engine:
         if not plan.remove[side]:
             return
         own = a_by if side == APPLE else s_by
-        items = [own[i] for i in sorted(plan.remove[side]) if i in own]
+        pairs = [(i, own[i]) for i in sorted(plan.remove[side]) if i in own]
+        items = [it for _, it in pairs]
         try:
             self._write(self.side(side), key, "remove", items)
         except (AuthError, Throttled):
@@ -569,11 +619,45 @@ class Engine:
             self.log("remove_failed", collection=key, side=side, detail=str(e))
             return
         self.state.drop_listing(key, side)
-        for it in items:
-            self.log("remove", collection=key, side=side, label=it.describe())
+        still = self._verify_removes(key, side, pairs)
+        for identity, it in pairs:
+            if identity in still:
+                # Keep it on the books: retried as a removal next run rather
+                # than read as a fresh add and copied back to the other side.
+                plan.remove[side].discard(identity)
+                plan.stable.add(identity)
+                self.log("remove_unconfirmed", collection=key, side=side, label=it.describe())
+            else:
+                self.log("remove", collection=key, side=side, label=it.describe())
+        if still:
+            self.needs_review.append(
+                f"{plan.label}: {len(still)} removal(s) on {side} were accepted but the items are still there")
+
+    def _verify_removes(self, key: str, side: str, removed: list[tuple[str, Item]]) -> set[str]:
+        """Identities that a fresh listing still shows after their removal."""
+        pending = dict(removed)
+        for delay in self.VERIFY_DELAYS:
+            if delay:
+                self._sleep(delay)
+            listing = self._listing(key, side, fresh=True)
+            if not listing.complete:
+                continue
+            items = self.apple.enrich(listing.items) if side == APPLE else listing.items
+            ids = {stable_id(i) for i in items}
+            codes = {i.code for i in items if i.code}
+            pending = {i: it for i, it in pending.items()
+                       if stable_id(it) in ids or (it.code and it.code in codes)}
+            if not pending:
+                break
+        return set(pending)
 
     def _write(self, prov: Provider, key: str, op: str, items: list[Item]) -> None:
-        if key == LIKED:
+        if key == FAVS:
+            if prov.side == APPLE:
+                (prov.favorite if op == "add" else prov.unfavorite)(items)
+            else:
+                (prov.add_to_playlist if op == "add" else prov.remove_from_playlist)(self._favs_pid, items)
+        elif key == LIKED:
             (prov.like if op == "add" else prov.unlike)(items)
         elif key == ALBUMS:
             (prov.save_albums if op == "add" else prov.unsave_albums)(items)
