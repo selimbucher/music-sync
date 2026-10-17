@@ -1,6 +1,6 @@
 # music-sync
 
-Bidirectional Apple Music <-> Spotify sync. Deletions propagate both ways. First run makes Spotify match Apple Music exactly.
+Bidirectional Apple Music <-> Spotify sync. Deletions propagate both ways. First run merges both libraries.
 
 | Spotify | Apple Music |
 |---|---|
@@ -94,10 +94,11 @@ and add `"music-sync.service"` to its `before` list.
 
 ```sh
 # on the server; runs with the service's credentials and environment
-sudo music-sync-admin seed --dry-run     # lists every add, removal, playlist deletion and reorder
-sudo music-sync-admin seed               # Spotify := Apple Music exactly, incl. track order
-# --force            when the dry run showed a collection losing >20% / >50 items and that is intended
-# --keep-extra-playlists to leave Spotify-only playlists in place
+sudo music-sync-admin seed --dry-run     # lists every add and every playlist to be created
+sudo music-sync-admin seed               # merge: both sides end with everything, nothing removed
+# --mirror           instead: Spotify := Apple Music exactly (removes Spotify-only items, copies order)
+# --force            with --mirror, when a collection losing >20% / >50 items is intended
+# --keep-extra-playlists  with --mirror, leave Spotify-only playlists in place
 ```
 
 The timer is already active after the rebuild; `sync` is a no-op until seeded.
@@ -123,11 +124,13 @@ sudo systemctl restart hetzner-secrets && sudo systemctl start music-sync
 
 - Deletions only from listings the API reported complete
 - A run never deletes more than 20% or 50 items of a collection, or more than 2 playlists; over that it stops and mails
+- After the seed, a run never adds more than 50 items and 50% to one side of a collection; over that it stops and mails (`sync --force` after review)
+- An add counts only once a fresh listing shows it; Apple accepts and silently drops ids it cannot add
 - Items with no confident match are quarantined and retried with backoff; they are never deleted
 - Follows/artists are not synced: Apple exposes no follow API
 
 ## Not synced
 
-- Track order within playlists after the seed (seed copies Apple's order to Spotify once)
+- Track order within playlists (new copies keep the source's order; `seed --mirror` copies Apple's order once)
 - Local files / uploaded tracks (no catalog id)
 - Podcasts, audiobooks

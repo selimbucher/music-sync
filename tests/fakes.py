@@ -26,6 +26,9 @@ class Fake:
         self.complete = True
         self.dead = False
         self.fail_add = False
+        self.ignore: set[str] = set()   # natives accepted but silently dropped, like Apple's 202
+        self.lag = 0                    # listings that pass before queued writes show up
+        self._queued: list = []
 
     # -- helpers ------------------------------------------------------------
     def _rec(self, native: str) -> tuple[str, dict] | None:
@@ -45,7 +48,21 @@ class Fake:
         return Item(kind=TRACK, side=SPOTIFY, native_id=native, title=r["title"], artist=r["artist"],
                     duration_ms=r["duration_ms"], position=position)
 
+    def _land(self, target: list, natives: list[str]) -> None:
+        natives = [n for n in natives if n not in self.ignore]
+        if self.lag:
+            self._queued.append([self.lag, target, natives])
+        else:
+            target.extend(natives)
+
+    def _tick(self) -> None:
+        for q in list(self._queued):
+            q[0] -= 1
+            if q[0] < 0:
+                q[1].extend(q[2]); self._queued.remove(q)
+
     def _listing(self, natives: list[str]) -> Listing:
+        self._tick()
         if not self.complete:
             return Listing(items=[], complete=False, error="truncated")
         return Listing(items=[self._item(n, i) for i, n in enumerate(natives)], complete=True)
@@ -123,8 +140,7 @@ class Fake:
     def add_to_playlist(self, pid, items):
         if self.fail_add:
             raise RuntimeError("boom")
-        for it in items:
-            self.playlists_[pid]["items"].append(self._native_of(it))
+        self._land(self.playlists_[pid]["items"], [self._native_of(it) for it in items])
         self.calls.append(("add", pid, [self._native_of(i) for i in items]))
 
     def remove_from_playlist(self, pid, items):
@@ -139,7 +155,7 @@ class Fake:
     def like(self, items):
         if self.fail_add:
             raise RuntimeError("boom")
-        self.liked_ += [self._native_of(i) for i in items]
+        self._land(self.liked_, [self._native_of(i) for i in items])
         self.calls.append(("like", [self._native_of(i) for i in items]))
 
     def unlike(self, items):

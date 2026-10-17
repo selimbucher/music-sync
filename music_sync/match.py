@@ -70,30 +70,39 @@ def resolve_apple_to_spotify(item: Item, spotify: Provider) -> Match | None:
     return Match(identity_of(item), best) if best else None
 
 
+# Spotify's search endpoint has a small daily quota in Development Mode, so a
+# round trip is the last resort, for at most this many candidates.
+ROUND_TRIP_MAX = 3
+
+
 def resolve_spotify_to_apple(item: Item, apple: Provider, spotify: Provider) -> Match | None:
-    """``item`` is a Spotify item with no code. Round-trip verification."""
+    """``item`` is a Spotify item with no code.
+
+    Apple catalog candidates are narrowed to the same primary artist and core
+    title within duration tolerance. One left: accepted without a Spotify
+    search. Several: the exact title wins, then the closest duration. None
+    left by name: a round trip through Spotify's code search over the closest
+    few, which spends quota and may raise SearchQuota (the caller defers)."""
     if item.kind == ARTIST:
         return _resolve_artist(item, apple)
-    candidates = apple.search(item.kind, primary_artist(item.artist), item.title)
-    candidates = [c for c in apple.enrich(candidates) if c.code and _duration_ok(item, c)]
+    found = apple.search(item.kind, primary_artist(item.artist), item.title)
+    candidates = [c for c in apple.enrich(found) if c.code and _duration_ok(item, c)]
     if not candidates:
         return None
-    codes = list({c.code for c in candidates})
-    back = spotify.lookup_codes(item.kind, codes)
-    for cand in candidates:
-        if any(b.native_id == item.native_id for b in back.get(cand.code, [])):
-            return Match(identity_of(cand), cand)
-    # Fallback: a single candidate whose title and primary artist normalize
-    # equal, within duration tolerance. Logged so it is auditable.
-    exact = [
-        c
-        for c in candidates
+    same = [
+        c for c in candidates
         if normalize(c.title) == normalize(item.title)
         and normalize(primary_artist(c.artist)) == normalize(primary_artist(item.artist))
     ]
-    if len(exact) == 1:
-        log.info("fuzzy-accepted %s -> apple %s", item.describe(), exact[0].native_id)
-        return Match(identity_of(exact[0]), exact[0])
+    if same:
+        exact = [c for c in same if c.title.casefold() == item.title.casefold()] or same
+        best = min(exact, key=lambda c: abs((c.duration_ms or 0) - (item.duration_ms or 0)))
+        return Match(identity_of(best), best)
+    close = sorted(candidates, key=lambda c: abs((c.duration_ms or 0) - (item.duration_ms or 0)))[:ROUND_TRIP_MAX]
+    back = spotify.lookup_codes(item.kind, list({c.code for c in close}))
+    for cand in close:
+        if any(b.native_id == item.native_id for b in back.get(cand.code, [])):
+            return Match(identity_of(cand), cand)
     return None
 
 

@@ -214,7 +214,19 @@ def test_cli_force_lifts_guard_for_seed_only(env, monkeypatch):
     monkeypatch.setattr(cli.notify, "send", lambda *a, **k: False)
     cfg.notify_email = None
     monkeypatch.setattr(cli, "Config", lambda: cfg)
-    rc = cli.main(["seed"])
+    rc = cli.main(["seed", "--mirror"])
     assert rc == 2 and sorted(spotify.liked_) == [f"sp-{c}" for c in "abcde"]   # guarded: nothing deleted
-    rc = cli.main(["seed", "--force"])
+    rc = cli.main(["seed", "--mirror", "--force"])
     assert rc == 0 and spotify.liked_ == ["sp-a"]
+
+
+def test_cli_seed_merges_by_default(env, monkeypatch):
+    from music_sync import cli
+    apple, spotify, st, cfg = env
+    apple.liked_ = ["am-a"]; spotify.liked_ = ["sp-b", "sp-c"]
+    monkeypatch.setattr(cli, "State", lambda path: st)
+    monkeypatch.setattr(cli, "_providers", lambda c, s: (apple, spotify))
+    monkeypatch.setattr(cli, "Config", lambda: cfg)
+    assert cli.main(["seed"]) == 0
+    assert sorted(apple.liked_) == ["am-a", "am-b", "am-c"]
+    assert sorted(spotify.liked_) == ["sp-a", "sp-b", "sp-c"]

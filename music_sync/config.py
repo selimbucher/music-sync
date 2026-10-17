@@ -53,6 +53,7 @@ class Config:
     max_delete_ratio: float = field(default_factory=lambda: float(os.environ.get("MUSIC_SYNC_MAX_DELETE_RATIO", "0.2")))
     max_delete_count: int = field(default_factory=lambda: int(os.environ.get("MUSIC_SYNC_MAX_DELETE_COUNT", "50")))
     max_playlist_deletes: int = field(default_factory=lambda: int(os.environ.get("MUSIC_SYNC_MAX_PLAYLIST_DELETES", "2")))
+    max_add_count: int = field(default_factory=lambda: int(os.environ.get("MUSIC_SYNC_MAX_ADD_COUNT", "50")))
 
     notify_email: str | None = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_NOTIFY_EMAIL"))
     notify_from: str = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_NOTIFY_FROM", "music-sync@localhost"))

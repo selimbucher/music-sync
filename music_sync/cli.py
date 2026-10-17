@@ -1,7 +1,7 @@
 """music-sync command line.
 
   auth spotify   one-time OAuth on a machine with a browser; writes the refresh token
-  seed           first run: Spotify := Apple Music exactly (Apple untouched)
+  seed           first run: merge both libraries (nothing removed); --mirror: Spotify := Apple Music
   sync           bidirectional run
   status         credentials, pairs, quarantine, last runs
   quarantine     list items that could not be matched
@@ -47,11 +47,11 @@ def _run(args, cfg: Config, seed: bool) -> int:
     state = State(cfg.state_path)
     apple, spotify = _providers(cfg, state)
     engine = Engine(apple, spotify, state, cfg, dry_run=args.dry_run)
-    if seed and getattr(args, "force", False):
-        engine.guard = merge.Guard(max_delete_ratio=1.0, max_delete_count=10**9)
+    if getattr(args, "force", False):
+        engine.guard = merge.Guard(max_delete_ratio=1.0, max_delete_count=10**9, max_add_count=10**9)
     try:
         if seed:
-            engine.seed(master=APPLE, prune_playlists=not args.keep_extra_playlists)
+            engine.seed(master=APPLE, prune_playlists=not args.keep_extra_playlists, union=not args.mirror)
         else:
             engine.sync()
     except AuthError as e:
@@ -160,13 +160,17 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("seed")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--mirror", action="store_true",
+                   help="instead of merging, make Spotify match Apple Music exactly (removes Spotify-only items)")
     s.add_argument("--keep-extra-playlists", action="store_true",
-                   help="leave playlists that exist only on Spotify (default: delete them, so Spotify matches exactly)")
+                   help="with --mirror: leave playlists that exist only on Spotify")
     s.add_argument("--force", action="store_true",
                    help="lift the mass-deletion guard for this run; use only after `seed --dry-run` listed every removal")
 
     y = sub.add_parser("sync")
     y.add_argument("--dry-run", action="store_true")
+    y.add_argument("--force", action="store_true",
+                   help="lift the deletion and flood guards for this run, after reviewing a --dry-run")
 
     sub.add_parser("status")
     sub.add_parser("quarantine")

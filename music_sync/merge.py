@@ -1,10 +1,13 @@
 """Three-way merge and its safety rails.
 
-Two modes:
+Three modes:
 
   SEED   one-way. The master side is authoritative and is never written to;
-         the mirror is made to match it exactly, including removals. Used for
-         the first run of a collection so the two libraries are not unioned.
+         the mirror is made to match it exactly, including removals.
+
+  UNION  first run, both ways: every collection becomes the union of the two
+         sides and nothing is removed anywhere. A merge against an empty
+         last_known.
 
   MERGE  bidirectional. An item's fate is decided against ``last_known``:
          absent from a side AND present in last_known means the user removed
@@ -30,6 +33,7 @@ from .models import APPLE, SPOTIFY, Item, other_side
 
 class Mode(Enum):
     SEED = "seed"
+    UNION = "union"
     MERGE = "merge"
 
 
@@ -72,13 +76,27 @@ class Plan:
 
 @dataclass
 class Guard:
-    """Refuse implausibly large deletions rather than mirror a bad read."""
+    """Refuse implausibly large deletions rather than mirror a bad read, and,
+    after the first run, implausibly large additions: a flood on one side
+    (say, starring an album that drags its tracks into the library) would
+    otherwise be copied straight to the other."""
 
     max_delete_ratio: float = 0.2
     max_delete_count: int = 50
     floor: int = 5  # below this many items, ratio is meaningless
+    max_add_count: int = 50
+    max_add_ratio: float = 0.5
 
     def check(self, plan: Plan, sizes: dict[str, int]) -> None:
+        if plan.mode is Mode.MERGE:
+            for side in (APPLE, SPOTIFY):
+                n, size = len(plan.add[side]), sizes.get(side, 0)
+                # An empty receiving side is a fresh copy (new playlist), not a flood.
+                if size and n > self.max_add_count and n > self.max_add_ratio * size:
+                    raise Abort(
+                        f"{plan.label}: {n} additions to {side} ({size} there now) looks "
+                        f"like a flood from the other side; review, then `sync --force`"
+                    )
         for side in (APPLE, SPOTIFY):
             n = len(plan.remove[side])
             if not n:
@@ -118,9 +136,11 @@ def plan_merge(
     apple_ids: set[str],
     spotify_ids: set[str],
     last_known: set[str],
+    mode: Mode = Mode.MERGE,
 ) -> Plan:
-    """Bidirectional three-way merge."""
-    p = Plan(collection=collection, label=label, mode=Mode.MERGE)
+    """Bidirectional three-way merge. With an empty last_known (UNION) it can
+    only add."""
+    p = Plan(collection=collection, label=label, mode=mode)
 
     only_apple = apple_ids - spotify_ids
     only_spotify = spotify_ids - apple_ids

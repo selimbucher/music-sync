@@ -70,11 +70,13 @@ class Engine:
         self.apple, self.spotify, self.state, self.cfg = apple, spotify, state, cfg
         self.dry = dry_run
         self.run = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-        self.guard = Guard(cfg.max_delete_ratio, cfg.max_delete_count)
+        self.guard = Guard(cfg.max_delete_ratio, cfg.max_delete_count, max_add_count=cfg.max_add_count)
         self.outcomes: list[Outcome] = []
         self.needs_review: list[str] = []
         self._code_cache: dict[tuple[str, str], list[Item]] = {}
         self._snapshots: dict[str, str | None] = {}   # spotify playlist id -> snapshot
+        self._created: set[str] = set()               # pairs whose playlist was created this run
+        self._sleep = time.sleep                      # stubbed in tests
 
     def side(self, name: str) -> Provider:
         return self.apple if name == APPLE else self.spotify
@@ -85,18 +87,30 @@ class Engine:
 
     # -- entry points ---------------------------------------------------------
 
-    def seed(self, master: str = APPLE, prune_playlists: bool = True) -> list[Outcome]:
-        """First run: mirror := master exactly, master untouched. Playlists
-        that exist only on the mirror are deleted unless ``prune_playlists``
-        is off; track order is copied where the mirror can reorder."""
+    def seed(self, master: str = APPLE, prune_playlists: bool = True, union: bool = False) -> list[Outcome]:
+        """First run.
+
+        union: every collection becomes the union of both sides; playlists
+        missing on one side are created there; nothing is removed anywhere.
+        The choice is remembered, so collections that appear later (or that a
+        throttled seed did not reach) are unioned by ``sync`` on their own.
+
+        Otherwise mirror := master exactly, master untouched: playlists that
+        exist only on the mirror are deleted unless ``prune_playlists`` is off,
+        and track order is copied where the mirror can reorder."""
         self.apple.probe()
         self.spotify.probe()
-        self._pair_playlists(seed_master=master, prune=prune_playlists)
+        if union and not self.dry:
+            self.state.set_meta("seed_mode", "union")
+        self._pair_playlists(seed_master=None if union else master, prune=False if union else prune_playlists)
         for key, label, kind in self._collections():
-            if self.state.is_seeded(key):
+            if self.state.is_seeded(key) and key not in self._created:
                 self.outcomes.append(Outcome(key, label, skipped="already seeded"))
                 continue
-            self._sync_one(key, label, kind, Mode.SEED, master)
+            if union:
+                self._sync_one(key, label, kind, Mode.UNION, None)
+            else:
+                self._sync_one(key, label, kind, Mode.SEED, master)
         return self.outcomes
 
     def sync(self) -> list[Outcome]:
@@ -108,9 +122,13 @@ class Engine:
         self.apple.probe()
         self.spotify.probe()
         self._pair_playlists(seed_master=None, prune=False)
+        union = self.state.get_meta("seed_mode") == "union"
         for key, label, kind in self._collections():
             if not self.state.is_seeded(key):
-                self.outcomes.append(Outcome(key, label, skipped="not seeded; run `music-sync seed`"))
+                if union:
+                    self._sync_one(key, label, kind, Mode.UNION, None)
+                else:
+                    self.outcomes.append(Outcome(key, label, skipped="not seeded; run `music-sync seed`"))
                 continue
             self._sync_one(key, label, kind, Mode.MERGE, None)
         return self.outcomes
@@ -144,9 +162,9 @@ class Engine:
             return None
         return self._snapshots.get(self._pair_row(key)["spotify_id"])
 
-    def _listing(self, key: str, side: str) -> Listing:
+    def _listing(self, key: str, side: str, fresh: bool = False) -> Listing:
         prov = self.side(side)
-        sig = self._signature(key, side)
+        sig = None if fresh else self._signature(key, side)
         if sig:
             cached = self.state.cached_listing(key, side, sig, CACHE_MAX_AGE_S)
             if cached is not None:
@@ -160,7 +178,7 @@ class Engine:
             listing = prov.playlist_items(row["apple_id"] if side == APPLE else row["spotify_id"])
         if sig and listing.complete:
             self.state.store_listing(key, side, sig, [asdict(i) for i in listing.items])
-        elif side == SPOTIFY:
+        elif side == SPOTIFY and not fresh:
             self.state.drop_listing(key, side)
         return listing
 
@@ -213,6 +231,11 @@ class Engine:
         paired_a = {r["apple_id"] for r in self.state.pairs()}
         paired_s = {r["spotify_id"] for r in self.state.pairs()}
         by_name_s = {p.name.strip().lower(): p for p in spotify.values() if p.native_id not in paired_s}
+        for side_name, pls in (("Apple", apple), ("Spotify", spotify)):
+            names = [p.name.strip().lower() for p in pls.values()]
+            for dup in sorted({n for n in names if names.count(n) > 1}):
+                self.needs_review.append(
+                    f"{side_name} has {names.count(dup)} playlists named '{dup}'; only the first is paired by name")
         for a_id, ap in apple.items():
             if a_id in paired_a:
                 continue
@@ -224,10 +247,12 @@ class Engine:
                          detail={"apple": a_id, "spotify": twin.native_id})
                 continue
             if self.dry:
-                log.info("[dry] would create Spotify playlist '%s'", ap.name)
+                n = len(self.apple.playlist_items(a_id).items)
+                self.needs_review.append(f"[dry] would create Spotify playlist '{ap.name}' with {n} tracks")
                 continue
             s_id = self.spotify.create_playlist(ap.name, ap.description)
             self.state.save_pair(key, TRACK, ap.name, a_id, s_id)
+            self._created.add(key)
             if seed_master is None:
                 # Born after seeding: the new side is empty by construction, so
                 # an empty last_known makes the first merge a plain copy.
@@ -248,10 +273,12 @@ class Engine:
                 continue
             key = f"pl:{uuid.uuid4().hex[:12]}"
             if self.dry:
-                log.info("[dry] would create Apple playlist '%s'", sp.name)
+                n = len(self.spotify.playlist_items(sp.native_id).items)
+                self.needs_review.append(f"[dry] would create Apple playlist '{sp.name}' with {n} tracks")
                 continue
             a_id = self.apple.create_playlist(sp.name, sp.description)
             self.state.save_pair(key, TRACK, sp.name, a_id, sp.native_id)
+            self._created.add(key)
             self.state.set_last_known(key, set())
             self.state.mark_seeded(key)
             self.log("create_playlist", collection=key, side=APPLE, label=sp.name)
@@ -346,7 +373,8 @@ class Engine:
             s_items = ls.items
 
             a_by = {match.identity_of(it): it for it in a_items}
-            s_ids = self._reconcile(key, kind, a_items, s_items, seed=(mode == Mode.SEED))
+            first_run = mode in (Mode.SEED, Mode.UNION)
+            s_ids = self._reconcile(key, kind, a_items, s_items, seed=first_run)
             s_by = {s_ids.get(it.native_id) or match.identity_of(it): it for it in s_items}
 
             if mode == Mode.SEED:
@@ -363,7 +391,8 @@ class Engine:
                     self.needs_review.append(f"{label}: mirror listing incomplete; seeded adds only")
             else:
                 merge.require_complete({APPLE: la.complete, SPOTIFY: ls.complete}, label)
-                plan = merge.plan_merge(key, label, set(a_by), set(s_by), self.state.last_known(key))
+                history = set() if mode == Mode.UNION else self.state.last_known(key)
+                plan = merge.plan_merge(key, label, set(a_by), set(s_by), history, mode=mode)
 
             self.guard.check(plan, {APPLE: len(a_by), SPOTIFY: len(s_by)})
             merge.suppress_quarantined(plan, self.state, key)
@@ -377,7 +406,7 @@ class Engine:
                         self._apply_adds(key, kind, side, plan, a_by, s_by, out, aliases)
                     for side in (APPLE, SPOTIFY):
                         self._apply_removes(key, kind, side, plan, a_by, s_by, out)
-                self._commit(key, plan, out.applied, aliases, seed=(mode == Mode.SEED))
+                self._commit(key, plan, out.applied, aliases, seed=first_run)
             if mode == Mode.SEED and key.startswith("pl:"):
                 # Order is part of "exactly"; a dry run only reports it.
                 self._match_order(key, label, master, a_items, s_items, s_ids, aliases, out)
@@ -420,12 +449,16 @@ class Engine:
         far_by = a_by if far == APPLE else s_by
         own_by = s_by if far == APPLE else a_by
         prov = self.side(side)
+        present = {stable_id(it) for it in own_by.values()}
         resolved: list[tuple[str, Item]] = []
-        for identity in sorted(plan.add[side]):
+        # Source order, so a copied playlist reads like the original.
+        order = sorted(plan.add[side], key=lambda i: (far_by[i].position is None, far_by[i].position or 0, i))
+        for identity in order:
             origin = far_by[identity]
             known = self.state.native_id(identity, side)
             if known:
-                it = Item(kind=kind, side=side, native_id=known, title=origin.title, artist=origin.artist)
+                it = Item(kind=kind, side=side, native_id=known, title=origin.title, artist=origin.artist,
+                          duration_ms=origin.duration_ms)
                 resolved.append((identity, it.with_catalog(known) if side == APPLE else it))
                 continue
             try:
@@ -454,11 +487,20 @@ class Engine:
                     plan.remove[side].discard(rid)
                     resolved = [(i, it) for i, it in resolved if stable_id(it) != stable_id(own_by[rid])]
                     plan.stable.add(aliases.get(rid, rid))
-        if not resolved:
+        # Already here under an identity reconciliation could not pin: writing
+        # it again would duplicate a playlist entry. Count it as landed.
+        fresh: list[tuple[str, Item]] = []
+        for identity, it in resolved:
+            if stable_id(it) in present:
+                out.applied[side].add(identity)
+                self.log("already_present", collection=key, side=side, label=it.describe())
+            else:
+                fresh.append((identity, it))
+                present.add(stable_id(it))
+        if not fresh:
             return
-        items = [it for _, it in resolved]
         try:
-            self._write(prov, key, "add", items)
+            self._write(prov, key, "add", [it for _, it in fresh])
         except (AuthError, Throttled):
             raise
         except Exception as e:  # noqa: BLE001
@@ -466,10 +508,48 @@ class Engine:
             self.log("add_failed", collection=key, side=side, detail=str(e))
             return
         self.state.drop_listing(key, side)
-        for identity, it in resolved:
-            out.applied[side].add(identity)
-            self.state.clear_quarantine(key, identity, side)
-            self.log("add", collection=key, side=side, label=it.describe())
+        landed = self._verify_adds(key, side, fresh, {stable_id(it) for it in own_by.values()})
+        for identity, it in fresh:
+            if identity in landed:
+                out.applied[side].add(identity)
+                self.state.clear_quarantine(key, identity, side)
+                self.log("add", collection=key, side=side, label=it.describe())
+            else:
+                self.state.quarantine(key, identity, side, it.describe(), "write accepted but never appeared")
+                out.quarantined.append(it.describe())
+                self.log("add_unconfirmed", collection=key, side=side, label=it.describe())
+        missing = len(fresh) - len([i for i, _ in fresh if i in landed])
+        if missing:
+            self.needs_review.append(f"{plan.label}: {missing} add(s) on {side} were accepted but never appeared")
+
+    # Apple shows additions with a lag; total wait is bounded at ~37 s.
+    VERIFY_DELAYS = (0, 2, 5, 10, 20)
+
+    def _verify_adds(self, key: str, side: str, written: list[tuple[str, Item]], before: set[str]) -> set[str]:
+        """Identities whose add shows up in a fresh listing of ``side``.
+
+        Apple answers 202 and silently drops ids it cannot add. Trusting the
+        status code would put a missing item into last_known, and the next run
+        would mirror its absence as a deletion on the other side."""
+        pending = dict(written)
+        landed: set[str] = set()
+        for delay in self.VERIFY_DELAYS:
+            if delay:
+                self._sleep(delay)
+            listing = self._listing(key, side, fresh=True)
+            if not listing.complete:
+                continue
+            items = self.apple.enrich(listing.items) if side == APPLE else listing.items
+            ids = {stable_id(i) for i in items}
+            codes = {i.code for i in items if i.code}
+            new_keys = {i.fuzzy_key for i in items if stable_id(i) not in before}
+            for identity, it in list(pending.items()):
+                if stable_id(it) in ids or (it.code and it.code in codes) or it.fuzzy_key in new_keys:
+                    landed.add(identity)
+                    del pending[identity]
+            if not pending:
+                break
+        return landed
 
     def _apply_removes(self, key, kind, side, plan: Plan, a_by, s_by, out: Outcome) -> None:
         if not plan.remove[side]:
