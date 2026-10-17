@@ -84,15 +84,17 @@ class Guard:
     max_delete_ratio: float = 0.2
     max_delete_count: int = 50
     floor: int = 5  # below this many items, ratio is meaningless
+    # Adds per side per run after the seed. A person adds a song or an album
+    # between two 15-minute runs, not hundreds; a ratio would let a flood into
+    # a large library slip through.
     max_add_count: int = 50
-    max_add_ratio: float = 0.5
 
     def check(self, plan: Plan, sizes: dict[str, int]) -> None:
         if plan.mode is Mode.MERGE:
             for side in (APPLE, SPOTIFY):
                 n, size = len(plan.add[side]), sizes.get(side, 0)
                 # An empty receiving side is a fresh copy (new playlist), not a flood.
-                if size and n > self.max_add_count and n > self.max_add_ratio * size:
+                if size and n > self.max_add_count:
                     raise Abort(
                         f"{plan.label}: {n} additions to {side} ({size} there now) looks "
                         f"like a flood from the other side; review, then `sync --force`"

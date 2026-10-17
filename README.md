@@ -124,7 +124,7 @@ sudo systemctl restart hetzner-secrets && sudo systemctl start music-sync
 
 - Deletions only from listings the API reported complete
 - A run never deletes more than 20% or 50 items of a collection, or more than 2 playlists; over that it stops and mails
-- After the seed, a run never adds more than 50 items and 50% to one side of a collection; over that it stops and mails (`sync --force` after review)
+- After the seed, a run never adds more than 50 items to one side of a collection (new playlists excepted); over that it stops and mails (`sync --force` after review)
 - An add counts only once a fresh listing shows it; Apple accepts and silently drops ids it cannot add
 - Items with no confident match are quarantined and retried with backoff; they are never deleted
 - Follows/artists are not synced: Apple exposes no follow API

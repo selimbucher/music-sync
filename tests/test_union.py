@@ -137,6 +137,12 @@ def test_flood_guard_after_seed_only():
     seeded = plan_merge("c", "c", big, {"x"}, {"x"})                 # 100 new on Apple, 1 on Spotify
     with pytest.raises(Abort, match="flood"):
         Guard().check(seeded, {APPLE: 101, SPOTIFY: 1})
+    library = {f"l{n}" for n in range(620)}
+    flood = plan_merge("c", "c", library | {f"f{n}" for n in range(200)}, library, library)
+    with pytest.raises(Abort, match="flood"):                        # 200 into 620: still a flood
+        Guard().check(flood, {APPLE: 820, SPOTIFY: 620})
+    normal = plan_merge("c", "c", library | {f"f{n}" for n in range(12)}, library, library)
+    Guard().check(normal, {APPLE: 632, SPOTIFY: 620})                # an album's worth is fine
     first = plan_merge("c", "c", big, {"x"}, set(), mode=Mode.UNION)
     Guard().check(first, {APPLE: 100, SPOTIFY: 1})                   # the seed may add a lot
     copy = plan_merge("c", "c", big, set(), set())
