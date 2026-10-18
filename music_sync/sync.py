@@ -553,23 +553,46 @@ class Engine:
         except (AuthError, Throttled):
             raise
         except Exception as e:  # noqa: BLE001
-            self.needs_review.append(f"{plan.label}: add on {side} failed: {e}")
-            self.log("add_failed", collection=key, side=side, detail=str(e))
-            return
+            # One bad item fails the whole batch; find it, add the rest. The
+            # culprit goes to quarantine so it is retried with backoff instead
+            # of failing (and mailing) every run.
+            ok = []
+            for identity, it in (fresh if len(fresh) > 1 else []):
+                try:
+                    self._write(prov, key, "add", [it])
+                    ok.append((identity, it))
+                except (AuthError, Throttled):
+                    raise
+                except Exception as e1:  # noqa: BLE001
+                    self._add_failed(key, side, plan, aliases.get(identity, identity), it, e1, out)
+            if len(fresh) == 1:
+                self._add_failed(key, side, plan, aliases.get(fresh[0][0], fresh[0][0]), fresh[0][1], e, out)
+            fresh = ok
+            if not fresh:
+                return
         self.state.drop_listing(key, side)
         landed = self._verify_adds(key, side, fresh, {stable_id(it) for it in own_by.values()})
         for identity, it in fresh:
             if identity in landed:
                 out.applied[side].add(identity)
-                self.state.clear_quarantine(key, identity, side)
+                self.state.clear_quarantine(key, aliases.get(identity, identity), side)
                 self.log("add", collection=key, side=side, label=it.describe())
             else:
-                self.state.quarantine(key, identity, side, it.describe(), "write accepted but never appeared")
+                # Under the identity the next run will plan with (the matched
+                # one), or the backoff would never find this row.
+                self.state.quarantine(key, aliases.get(identity, identity), side, it.describe(),
+                                      "write accepted but never appeared")
                 out.quarantined.append(it.describe())
                 self.log("add_unconfirmed", collection=key, side=side, label=it.describe())
         missing = len(fresh) - len([i for i, _ in fresh if i in landed])
         if missing:
             self.needs_review.append(f"{plan.label}: {missing} add(s) on {side} were accepted but never appeared")
+
+    def _add_failed(self, key, side, plan: Plan, identity: str, it: Item, err: Exception, out: Outcome) -> None:
+        self.state.quarantine(key, identity, side, it.describe(), f"write failed: {str(err)[:200]}")
+        out.quarantined.append(it.describe())
+        self.needs_review.append(f"{plan.label}: add of {it.describe()!r} on {side} failed: {err}")
+        self.log("add_failed", collection=key, side=side, label=it.describe(), detail=str(err))
 
     # Apple shows additions with a lag; total wait is bounded at ~37 s.
     VERIFY_DELAYS = (0, 2, 5, 10, 20)

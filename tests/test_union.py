@@ -158,3 +158,14 @@ def test_dry_union_writes_nothing_and_reports_new_playlists(env):
     assert not writes(spotify) and not writes(apple)
     assert any("Only Apple' with 2 tracks" in r for r in e.needs_review)
     assert not st.is_seeded(LIKED) and st.get_meta("seed_mode") is None
+
+
+def test_never_appeared_backoff_holds_under_the_matched_identity(env):
+    apple, spotify, st, cfg = env
+    spotify.liked_ = ["sp-a", "sp-b"]
+    apple.ignore = {"am-b"}
+    run(env, union_seed=True)
+    writes_before = [c for c in apple.calls if c[0] == "like"]
+    e = run(env)                                          # next run: same item, now with its ISRC identity
+    assert [c for c in apple.calls if c[0] == "like"] == writes_before   # not re-sent inside the backoff
+    assert e.outcomes[0].plan.blocked == ["track:ISRC-B"] and e.needs_review == []

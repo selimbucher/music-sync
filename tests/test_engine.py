@@ -105,6 +105,9 @@ def test_failed_add_is_retried_not_mirrored_as_delete(env):
     assert st.last_known(LIKED) == {"track:ISRC-A"}     # b not confirmed
     spotify.fail_add = False
     engine(env).sync()
+    assert "sp-b" not in spotify.liked_                   # in backoff: not hammered every run
+    st.db.execute("UPDATE quarantine SET last_try = last_try - 7200")   # two hours later
+    engine(env).sync()
     assert "sp-b" in spotify.liked_                       # retried as an add
     assert "am-b" in apple.liked_                         # never deleted from Apple
 

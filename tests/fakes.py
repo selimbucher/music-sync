@@ -154,7 +154,7 @@ class Fake:
         self.calls.append(("delete_playlist", pid))
 
     def add_to_playlist(self, pid, items):
-        if self.fail_add:
+        if self.fail_add or any(self._native_of(i) in getattr(self, "poison", set()) for i in items):
             raise RuntimeError("boom")
         self._land(self.playlists_[pid]["items"], [self._native_of(it) for it in items])
         self.calls.append(("add", pid, [self._native_of(i) for i in items]))
