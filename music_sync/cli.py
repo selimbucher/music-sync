@@ -80,7 +80,8 @@ def _run(args, cfg: Config, seed: bool) -> int:
         msg = f"{e}\n\nThe stored credential no longer works. Re-auth steps are in the README."
         print(msg, file=sys.stderr)
         state.log(engine.run, "auth_error", detail=str(e))
-        notify.send(cfg.notify_email, cfg.notify_from, "credentials dead", msg)
+        if not args.dry_run:
+            notify.send(cfg.notify_email, cfg.notify_from, "credentials dead", msg)
         return 3
     except Throttled as e:
         print(e, file=sys.stderr)
@@ -92,7 +93,8 @@ def _run(args, cfg: Config, seed: bool) -> int:
     report = engine.report()
     print(report)
     if engine.needs_review:
-        notify.send(cfg.notify_email, cfg.notify_from, "needs review", report)
+        if not args.dry_run:
+            notify.send(cfg.notify_email, cfg.notify_from, "needs review", report)
         return 2
     return 0
 
@@ -129,6 +131,16 @@ def _auth_spotify(args, cfg: Config) -> int:
     out.chmod(0o600)
     print(f"refresh token written to {out}")
     return 0
+
+
+def _notify_test(args, cfg: Config) -> int:
+    if not cfg.notify_email:
+        sys.exit("MUSIC_SYNC_NOTIFY_EMAIL is not set")
+    ok = notify.send(cfg.notify_email, cfg.notify_from, "test",
+                     "If you can read this, music-sync can reach you when a run needs review "
+                     "or a credential dies.")
+    print(f"test mail to {cfg.notify_email}: {'sent' if ok else 'FAILED (see log)'}")
+    return 0 if ok else 1
 
 
 def _status(args, cfg: Config) -> int:
@@ -195,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="lift the deletion and flood guards for this run, after reviewing a --dry-run")
 
     sub.add_parser("status")
+    sub.add_parser("notify-test", help="send a test mail to the notify address")
     sub.add_parser("quarantine")
     j = sub.add_parser("journal")
     j.add_argument("-n", type=int, default=50)
@@ -210,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args, cfg, seed=False)
     if args.cmd == "status":
         return _status(args, cfg)
+    if args.cmd == "notify-test":
+        return _notify_test(args, cfg)
     if args.cmd == "quarantine":
         return _quarantine(args, cfg)
     if args.cmd == "journal":
