@@ -368,10 +368,10 @@ class Apple:
             self._req("DELETE", f"/me/library/songs/{it.native_id}")
 
     def favorite(self, items: list[Item]) -> None:
-        """Star. Apple adds favourited songs to the library itself."""
-        ids = [it.catalog_id or it.native_id for it in items]
-        for i in range(0, len(ids), ADD_BATCH):
-            self._req("POST", "/me/favorites", params={"ids[songs]": ",".join(ids[i:i + ADD_BATCH])})
+        """Star. Apple adds favourited songs to the library itself. The
+        endpoint takes exactly one id per request (400 code 40005 otherwise)."""
+        for it in items:
+            self._req("POST", "/me/favorites", params={"ids[songs]": it.catalog_id or it.native_id})
 
     def unfavorite(self, items: list[Item]) -> None:
         """Unstar. The library entry stays, as it does in the app."""
@@ -388,9 +388,8 @@ class Apple:
 
     def save_albums(self, items: list[Item]) -> None:
         """Star the album (which also puts it in the library)."""
-        ids = [it.catalog_id or it.native_id for it in items]
-        for i in range(0, len(ids), ADD_BATCH):
-            self._req("POST", "/me/favorites", params={"ids[albums]": ",".join(ids[i:i + ADD_BATCH])})
+        for it in items:  # one id per request, as for songs
+            self._req("POST", "/me/favorites", params={"ids[albums]": it.catalog_id or it.native_id})
 
     def unsave_albums(self, items: list[Item]) -> None:
         """Unstar; the library entry stays, as in the app."""
