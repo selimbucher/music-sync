@@ -7,7 +7,7 @@ Bidirectional Apple Music <-> Spotify sync. Deletions propagate both ways. First
 | Playlists | Playlists |
 | Liked Songs | Library songs (+) by default; `appleLiked = "favorites"` for the star instead |
 | Playlist named by `spotifyFavoritesPlaylist` | Favourite Songs (★) |
-| Saved albums | Starred albums (the star). Apple's library-albums list is derived from single songs, so only the star means "saved" |
+| Saved albums | Starred albums (the star); off by default: starring an album adds all its tracks to the library, so it needs `appleLiked = "favorites"` |
 
 ## Prerequisites
 

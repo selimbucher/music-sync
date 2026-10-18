@@ -63,6 +63,18 @@ class Config:
     notify_email: str | None = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_NOTIFY_EMAIL"))
     notify_from: str = field(default_factory=lambda: os.environ.get("MUSIC_SYNC_NOTIFY_FROM", "music-sync@localhost"))
 
+    def conflicts(self) -> list[str]:
+        """Settings that cannot work together."""
+        out = []
+        if self.sync_albums and self.apple_liked == "library":
+            # Measured 2026-10-18: starring an album through the API adds every
+            # one of its tracks to the library, so each album synced to Apple
+            # would flood Liked Songs on both sides with its whole track list.
+            out.append("albums sync with Liked Songs = Apple library: starring an album on Apple "
+                       "adds all its tracks to the library. Set MUSIC_SYNC_ALBUMS=false "
+                       "(syncAlbums = false) or MUSIC_SYNC_APPLE_LIKED=favorites.")
+        return out
+
     def missing(self) -> list[str]:
         out = []
         if not self.apple_user_token:

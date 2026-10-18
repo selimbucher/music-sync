@@ -245,3 +245,11 @@ def test_cli_skips_while_another_run_holds_the_lock(env, monkeypatch):
     finally:
         held.close()
     assert cli.main(["seed"]) == 0 and spotify.liked_ == ["sp-a"]
+
+
+def test_albums_with_library_liked_refuse_to_start():
+    from music_sync.config import Config
+    cfg = Config(sync_albums=True, apple_liked="library")
+    assert cfg.conflicts() and "all its tracks" in cfg.conflicts()[0]
+    assert not Config(sync_albums=False, apple_liked="library").conflicts()
+    assert not Config(sync_albums=True, apple_liked="favorites").conflicts()

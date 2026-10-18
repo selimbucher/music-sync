@@ -50,8 +50,8 @@
             syncLiked = lib.mkOption { type = lib.types.bool; default = true; };
             syncAlbums = lib.mkOption {
               type = lib.types.bool;
-              default = true;
-              description = "Saved albums <-> albums starred on Apple Music (its library-albums list is derived from single songs).";
+              default = false;
+              description = "Saved albums <-> albums starred on Apple Music. Starring an album adds all its tracks to the library, so this needs appleLiked = \"favorites\".";
             };
             appleLiked = lib.mkOption {
               type = lib.types.enum [ "library" "favorites" ];
