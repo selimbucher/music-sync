@@ -230,3 +230,18 @@ def test_cli_seed_merges_by_default(env, monkeypatch):
     assert cli.main(["seed"]) == 0
     assert sorted(apple.liked_) == ["am-a", "am-b", "am-c"]
     assert sorted(spotify.liked_) == ["sp-a", "sp-b", "sp-c"]
+
+
+def test_cli_skips_while_another_run_holds_the_lock(env, monkeypatch):
+    from music_sync import cli
+    apple, spotify, st, cfg = env
+    apple.liked_ = ["am-a"]
+    monkeypatch.setattr(cli, "Config", lambda: cfg)
+    monkeypatch.setattr(cli, "_providers", lambda c, s: (apple, spotify))
+    held = cli._lock(cfg)
+    try:
+        assert cli.main(["seed"]) == 0
+        assert spotify.liked_ == [] and not st.is_seeded("liked")     # skipped, nothing written
+    finally:
+        held.close()
+    assert cli.main(["seed"]) == 0 and spotify.liked_ == ["sp-a"]

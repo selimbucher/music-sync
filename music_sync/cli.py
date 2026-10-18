@@ -12,6 +12,7 @@ Exit codes: 0 ok, 1 error, 2 needs review, 3 credentials dead, 4 throttled.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import http.server
 import logging
 import secrets
@@ -43,7 +44,25 @@ def _providers(cfg: Config, state: State) -> tuple[Apple, Spotify]:
     )
 
 
+def _lock(cfg: Config):
+    """One run at a time: a seed can outlast the 15-minute timer, and two
+    runs creating the same playlist would leave duplicates. None if busy."""
+    path = Path(str(cfg.state_path) + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
+
+
 def _run(args, cfg: Config, seed: bool) -> int:
+    lock = _lock(cfg)
+    if lock is None:
+        print("another music-sync run is in progress; skipping")
+        return 0
     state = State(cfg.state_path)
     apple, spotify = _providers(cfg, state)
     engine = Engine(apple, spotify, state, cfg, dry_run=args.dry_run)
