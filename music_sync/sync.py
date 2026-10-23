@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from . import match, merge
 from .match import _duration_ok
 from .config import Config
-from .merge import Abort, Guard, Mode, Plan
+from .merge import Abort, Guard, Incomplete, Mode, Plan
 from .models import ALBUM, APPLE, SPOTIFY, TRACK, Item, other_side
 from .providers.base import AuthError, Listing, PlaylistRef, Provider, SearchQuota, Throttled
 from .state import State
@@ -28,6 +28,9 @@ FAVS = "favorites"
 # A cached Spotify listing is trusted while its signature is unchanged and it
 # is younger than this; after that a full listing is taken regardless.
 CACHE_MAX_AGE_S = 6 * 3600
+
+# Scope of the absence records for whole playlists (identity = pair key).
+PLAYLISTS = "playlists"
 
 
 def stable_id(item: Item) -> str:
@@ -60,6 +63,7 @@ class Outcome:
         q = f", {len(self.quarantined)} unmatched" if self.quarantined else ""
         b = f", {len(self.plan.blocked)} in backoff" if self.plan.blocked else ""
         b += f", {len(self.deferred)} deferred (search quota)" if self.deferred else ""
+        b += f", {len(self.plan.held)} removal(s) held for a second read" if self.plan.held else ""
         return (
             f"{self.label}: apple +{len(self.applied[APPLE])}/{c['add_apple']} -{c['del_apple']}, "
             f"spotify +{len(self.applied[SPOTIFY])}/{c['add_spotify']} -{c['del_spotify']}{q}{b}"
@@ -74,10 +78,15 @@ class Engine:
         self.guard = Guard(cfg.max_delete_ratio, cfg.max_delete_count, max_add_count=cfg.max_add_count)
         self.outcomes: list[Outcome] = []
         self.needs_review: list[str] = []
+        self.transient: set[str] = set()              # review lines worth a mail only if they persist
+        self.max_playlist_deletes = cfg.max_playlist_deletes
         self._code_cache: dict[tuple[str, str], list[Item]] = {}
         self._snapshots: dict[str, str | None] = {}   # spotify playlist id -> snapshot
         self._created: set[str] = set()               # pairs whose playlist was created this run
         self._sp_pls: dict[str, PlaylistRef] | None = None
+        self._ap_pls: dict[str, PlaylistRef] | None = None
+        self._pls_ok: bool | None = None              # both playlist lists read and believable
+        self._gone: dict[str, set[str]] = {APPLE: set(), SPOTIFY: set()}   # pair keys confirmed missing
         self._favs_pid: str | None = None             # the Spotify playlist mirroring Apple ★
         self._sleep = time.sleep                      # stubbed in tests
 
@@ -87,6 +96,11 @@ class Engine:
     def log(self, action: str, **kw) -> None:
         if not self.dry:
             self.state.log(self.run, action, **kw)
+
+    def review(self, msg: str, transient: bool = False) -> None:
+        self.needs_review.append(msg)
+        if transient:
+            self.transient.add(msg)
 
     # -- entry points ---------------------------------------------------------
 
@@ -144,7 +158,10 @@ class Engine:
         out: list[tuple[str, str, str]] = []
         # ★ first: starring a song on Apple can add it to the library, and
         # Liked (the library) should then see it in the same run.
-        if self._favs_pid:
+        # Playlist contents only for playlists this run's listings show: a
+        # deleted Apple playlist lists as empty, which would read as every
+        # track removed.
+        if self._favs_pid and self._favs_pid in (self._sp_pls or {}):
             out.append((FAVS, "Favourites (\u2605)", TRACK))
         if self.cfg.sync_liked:
             self.state.save_pair(LIKED, TRACK, "Liked songs")
@@ -154,7 +171,8 @@ class Engine:
             out.append((ALBUMS, "Saved albums", ALBUM))
         if self.cfg.sync_playlists:
             for row in self.state.pairs():
-                if row["collection"].startswith("pl:") and row["apple_id"] and row["spotify_id"]:
+                if (row["collection"].startswith("pl:") and row["apple_id"] in (self._ap_pls or {})
+                        and row["spotify_id"] in (self._sp_pls or {})):
                     out.append((row["collection"], row["label"], TRACK))
         return out
 
@@ -204,19 +222,78 @@ class Engine:
             self._snapshots = {pid: p.snapshot for pid, p in self._sp_pls.items()}
         return self._sp_pls
 
+    def _apple_playlists(self) -> dict[str, PlaylistRef]:
+        if self._ap_pls is None:
+            self._ap_pls = {p.native_id: p for p in self.apple.playlists() if p.editable}
+        return self._ap_pls
+
+    def _playlists_read(self) -> bool:
+        """List both sides' playlists and decide whether to believe them.
+
+        A paired playlist missing on one side is normally a deletion, but
+        Spotify has answered /me/playlists without the user's own playlists:
+        the ★ playlist was recreated three times and two Apple playlists
+        deleted per run. So a playlist counts as gone only when two runs in a
+        row miss it, and more missing at once than ``max_playlist_deletes``
+        is a bad read that changes no playlist at all."""
+        if self._pls_ok is not None:
+            return self._pls_ok
+        self._pls_ok = False
+        try:
+            sp = self._spotify_playlists()
+            ap = self._apple_playlists() if self.cfg.sync_playlists else {}
+        except (AuthError, Throttled):
+            raise
+        except Exception as e:  # noqa: BLE001
+            self.review(f"playlist listing failed, no playlist changed: {e}", transient=True)
+            return False
+        missing: dict[str, set[str]] = {APPLE: set(), SPOTIFY: set()}
+        known = 0
+        for row in self.state.pairs():
+            key = row["collection"]
+            if key == FAVS and row["spotify_id"]:
+                known += 1
+                if row["spotify_id"] not in sp:
+                    missing[SPOTIFY].add(key)
+            elif key.startswith("pl:") and self.cfg.sync_playlists:
+                known += 1
+                if row["apple_id"] not in ap:
+                    missing[APPLE].add(key)
+                if row["spotify_id"] not in sp:
+                    missing[SPOTIFY].add(key)
+        # Recorded even from a bad read, so a `sync --force` after review
+        # finds the absences already seen once.
+        for side, keys in missing.items():
+            self._gone[side] = self.state.confirm_absent(PLAYLISTS, side, keys, self.run, record=not self.dry)
+        for side, keys in missing.items():
+            if len(keys) > self.max_playlist_deletes:
+                self.review(f"{len(keys)} of {known} synced playlists missing on {side} at once; "
+                            "taken for a bad read, no playlist changed (`sync --force` if you deleted them)",
+                            transient=True)
+                self._gone = {APPLE: set(), SPOTIFY: set()}
+                return False
+        self._pls_ok = True
+        return True
+
     def _setup_favorites(self) -> None:
         """Find (or create) the Spotify playlist that mirrors Apple's ★ songs."""
         name = self.cfg.spotify_favorites_playlist
         if not name:
             return
-        pls = self._spotify_playlists()
         row = self._pair_row(FAVS)
         pid = row["spotify_id"] if row else None
+        if not self._playlists_read():
+            self._favs_pid = pid  # contents still sync; nothing is created or forgotten
+            return
+        pls = self._spotify_playlists()
+        if pid and pid not in pls and FAVS not in self._gone[SPOTIFY]:
+            self._favs_pid = pid  # missing from one listing only; wait for the next
+            return
         if pid and pid not in pls:
             # Deleting the playlist is not un-starring everything: start over
             # with a fresh copy instead of mirroring the deletion onto Apple.
             self.state.forget_collection(FAVS)
-            self.needs_review.append(f"the \u2605 playlist '{row['label']}' is gone from Spotify; recreating it")
+            self.review(f"the \u2605 playlist '{row['label']}' is gone from Spotify; recreating it")
             pid = None
         if not pid:
             twin = next((p for p in pls.values() if p.name.strip().lower() == name.strip().lower()), None)
@@ -224,10 +301,11 @@ class Engine:
                 pid = twin.native_id
             elif self.dry:
                 n = len(self.apple.favorites().items)
-                self.needs_review.append(f"[dry] would create Spotify playlist '{name}' with your {n} \u2605 songs")
+                self.review(f"[dry] would create Spotify playlist '{name}' with your {n} \u2605 songs")
                 return
             else:
                 pid = self.spotify.create_playlist(name, "Apple Music favourites, kept in sync")
+                pls[pid] = PlaylistRef(pid, name)
                 self._created.add(FAVS)
                 self.log("create_playlist", collection=FAVS, side=SPOTIFY, label=name)
             self.state.save_pair(FAVS, TRACK, name, None, pid)
@@ -235,9 +313,9 @@ class Engine:
 
     def _pair_playlists(self, seed_master: str | None, prune: bool) -> None:
         """Reconcile the *set* of playlists before any contents are touched."""
-        if not self.cfg.sync_playlists:
+        if not self.cfg.sync_playlists or not self._playlists_read():
             return
-        apple = {p.native_id: p for p in self.apple.playlists() if p.editable}
+        apple = dict(self._apple_playlists())
         # The ★ playlist is its own collection, never a regular pair.
         spotify = {pid: p for pid, p in self._spotify_playlists().items() if pid != self._favs_pid}
         known = [r for r in self.state.pairs() if r["collection"].startswith("pl:")]
@@ -251,7 +329,8 @@ class Engine:
                 self._maybe_rename(key, row, apple[a], spotify[s])
                 continue
             if not a_here and not s_here:
-                self.state.forget_collection(key)
+                if key in self._gone[APPLE] and key in self._gone[SPOTIFY]:
+                    self.state.forget_collection(key)
                 continue
             if seed_master:
                 master_here = a_here if seed_master == APPLE else s_here
@@ -263,13 +342,13 @@ class Engine:
                     self._delete_playlist(key, row, mirror, mirror_id)
                     (spotify if mirror == SPOTIFY else apple).pop(mirror_id, None)
                 else:
-                    self.needs_review.append(
-                        f"playlist '{row['label']}' exists only on the mirror (seed without --prune)")
+                    self.review(f"playlist '{row['label']}' exists only on the mirror (seed without --prune)")
                 continue
-            if deletions >= self.cfg.max_playlist_deletes:
-                self.needs_review.append(
-                    f"playlist '{row['label']}' missing on one side; over the per-run cap of "
-                    f"{self.cfg.max_playlist_deletes}")
+            if key not in self._gone[APPLE if not a_here else SPOTIFY]:
+                continue  # first run to miss it; a second must agree
+            if deletions >= self.max_playlist_deletes:
+                self.review(f"playlist '{row['label']}' missing on one side; over the per-run cap of "
+                            f"{self.max_playlist_deletes}")
                 continue
             other, other_id = (SPOTIFY, s) if not a_here else (APPLE, a)
             self._delete_playlist(key, row, other, other_id)
@@ -283,8 +362,7 @@ class Engine:
         for side_name, pls in (("Apple", apple), ("Spotify", spotify)):
             names = [p.name.strip().lower() for p in pls.values()]
             for dup in sorted({n for n in names if names.count(n) > 1}):
-                self.needs_review.append(
-                    f"{side_name} has {names.count(dup)} playlists named '{dup}'; only the first is paired by name")
+                self.review(f"{side_name} has {names.count(dup)} playlists named '{dup}'; only the first is paired by name")
         for a_id, ap in apple.items():
             if a_id in paired_a:
                 continue
@@ -297,9 +375,10 @@ class Engine:
                 continue
             if self.dry:
                 n = len(self.apple.playlist_items(a_id).items)
-                self.needs_review.append(f"[dry] would create Spotify playlist '{ap.name}' with {n} tracks")
+                self.review(f"[dry] would create Spotify playlist '{ap.name}' with {n} tracks")
                 continue
             s_id = self.spotify.create_playlist(ap.name, ap.description)
+            self._sp_pls[s_id] = PlaylistRef(s_id, ap.name)
             self.state.save_pair(key, TRACK, ap.name, a_id, s_id)
             self._created.add(key)
             if seed_master is None:
@@ -312,7 +391,7 @@ class Engine:
         for sp in by_name_s.values():
             if seed_master == APPLE:
                 if not prune:
-                    self.needs_review.append(
+                    self.review(
                         f"Spotify-only playlist '{sp.name}' left alone (seed without --prune)")
                 elif self.dry:
                     log.info("[dry] would delete Spotify-only playlist '%s'", sp.name)
@@ -323,9 +402,10 @@ class Engine:
             key = f"pl:{uuid.uuid4().hex[:12]}"
             if self.dry:
                 n = len(self.spotify.playlist_items(sp.native_id).items)
-                self.needs_review.append(f"[dry] would create Apple playlist '{sp.name}' with {n} tracks")
+                self.review(f"[dry] would create Apple playlist '{sp.name}' with {n} tracks")
                 continue
             a_id = self.apple.create_playlist(sp.name, sp.description)
+            self._ap_pls[a_id] = PlaylistRef(a_id, sp.name)
             self.state.save_pair(key, TRACK, sp.name, a_id, sp.native_id)
             self._created.add(key)
             self.state.set_last_known(key, set())
@@ -437,11 +517,13 @@ class Engine:
                                        set(s_by if master == APPLE else a_by))
                 if not x_list.complete:
                     plan.remove[mirror] = set()
-                    self.needs_review.append(f"{label}: mirror listing incomplete; seeded adds only")
+                    self.review(f"{label}: mirror listing incomplete; seeded adds only")
             else:
                 merge.require_complete({APPLE: la.complete, SPOTIFY: ls.complete}, label)
                 history = set() if mode == Mode.UNION else self.state.last_known(key)
                 plan = merge.plan_merge(key, label, set(a_by), set(s_by), history, mode=mode)
+                if mode == Mode.MERGE:
+                    self._hold_removals(key, plan)
 
             self.guard.check(plan, {APPLE: len(a_by), SPOTIFY: len(s_by)})
             merge.suppress_quarantined(plan, self.state, key)
@@ -461,8 +543,20 @@ class Engine:
                 self._match_order(key, label, master, a_items, s_items, s_ids, aliases, out)
         except Abort as e:
             out.skipped = str(e)
-            self.needs_review.append(str(e))
+            self.review(str(e), transient=isinstance(e, Incomplete))
             self.log("abort", collection=key, label=label, detail=str(e))
+
+    def _hold_removals(self, key: str, plan: Plan) -> None:
+        """Invariant 4: an item missing from one side is removed from the
+        other only when the previous run found it missing too. Until then it
+        stays in last_known, so it is neither removed nor copied back."""
+        for side in (APPLE, SPOTIFY):
+            confirmed = self.state.confirm_absent(key, other_side(side), plan.remove[side], self.run,
+                                                  record=not self.dry)
+            held = plan.remove[side] - confirmed
+            plan.remove[side] = confirmed
+            plan.held |= held
+            plan.stable |= held
 
     def _match_order(self, key, label, master, a_items, s_items, s_ids, aliases, out: Outcome) -> None:
         """Seed only: put the mirror playlist in the master's order."""
@@ -487,9 +581,9 @@ class Engine:
             self.state.drop_listing(key, mirror)
             self.log("reorder", collection=key, side=mirror, label=label, detail=len(target))
         except NotImplementedError as e:
-            self.needs_review.append(f"{label}: {e}")
+            self.review(f"{label}: {e}")
         except Exception as e:  # noqa: BLE001
-            self.needs_review.append(f"{label}: reorder on {mirror} failed: {e}")
+            self.review(f"{label}: reorder on {mirror} failed: {e}")
 
     def _apply_adds(self, key, kind, side, plan: Plan, a_by, s_by, out: Outcome, aliases) -> None:
         if not plan.add[side]:
@@ -586,12 +680,12 @@ class Engine:
                 self.log("add_unconfirmed", collection=key, side=side, label=it.describe())
         missing = len(fresh) - len([i for i, _ in fresh if i in landed])
         if missing:
-            self.needs_review.append(f"{plan.label}: {missing} add(s) on {side} were accepted but never appeared")
+            self.review(f"{plan.label}: {missing} add(s) on {side} were accepted but never appeared")
 
     def _add_failed(self, key, side, plan: Plan, identity: str, it: Item, err: Exception, out: Outcome) -> None:
         self.state.quarantine(key, identity, side, it.describe(), f"write failed: {str(err)[:200]}")
         out.quarantined.append(it.describe())
-        self.needs_review.append(f"{plan.label}: add of {it.describe()!r} on {side} failed: {err}")
+        self.review(f"{plan.label}: add of {it.describe()!r} on {side} failed: {err}")
         self.log("add_failed", collection=key, side=side, label=it.describe(), detail=str(err))
 
     # Apple shows additions with a lag; total wait is bounded at ~37 s.
@@ -638,7 +732,7 @@ class Engine:
             # run, not resurrected as an add on the other side.
             plan.stable |= plan.remove[side]
             plan.remove[side] = set()
-            self.needs_review.append(f"{plan.label}: remove on {side} failed: {e}")
+            self.review(f"{plan.label}: remove on {side} failed: {e}")
             self.log("remove_failed", collection=key, side=side, detail=str(e))
             return
         self.state.drop_listing(key, side)
@@ -653,7 +747,7 @@ class Engine:
             else:
                 self.log("remove", collection=key, side=side, label=it.describe())
         if still:
-            self.needs_review.append(
+            self.review(
                 f"{plan.label}: {len(still)} removal(s) on {side} were accepted but the items are still there")
 
     def _verify_removes(self, key: str, side: str, removed: list[tuple[str, Item]]) -> set[str]:

@@ -86,6 +86,28 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Things a run found missing on one side: an item of a collection, or a
+-- paired playlist itself (identity ''). A disappearance is acted on only
+-- once a later run reads it again; one bad listing is not a deletion.
+CREATE TABLE IF NOT EXISTS absent (
+    collection TEXT NOT NULL,
+    identity   TEXT NOT NULL,
+    side       TEXT NOT NULL,
+    run        TEXT NOT NULL,
+    ts         REAL NOT NULL,
+    PRIMARY KEY (collection, identity, side)
+);
+
+-- One row per review line (normalised), so a standing issue is mailed once
+-- instead of every run. ``streak`` is when its current unbroken run of
+-- sightings began; NULL once a run no longer reports it.
+CREATE TABLE IF NOT EXISTS review (
+    key         TEXT PRIMARY KEY,
+    streak      REAL,
+    last_seen   REAL NOT NULL,
+    last_mailed REAL
+);
 """
 
 # Quarantined items are retried on a widening schedule, in seconds.
@@ -175,7 +197,7 @@ class State:
         )
 
     def forget_collection(self, collection: str) -> None:
-        for table in ("last_known", "quarantine", "listing_cache"):
+        for table in ("last_known", "quarantine", "listing_cache", "absent"):
             self.db.execute(f"DELETE FROM {table} WHERE collection=?", (collection,))
         self.db.execute("DELETE FROM pair WHERE collection=?", (collection,))
 
@@ -328,6 +350,60 @@ class State:
 
     def drop_listing(self, collection: str, side: str) -> None:
         self.db.execute("DELETE FROM listing_cache WHERE collection=? AND side=?", (collection, side))
+
+    # -- absences -------------------------------------------------------------
+
+    def confirm_absent(self, collection: str, side: str, identities: set[str], run: str,
+                       record: bool = True) -> set[str]:
+        """Of ``identities``, now missing on ``side``, those an earlier run
+        already found missing. The record is replaced by this run's set, so
+        anything that came back is forgotten."""
+        seen = {
+            r["identity"]: r["run"]
+            for r in self.db.execute(
+                "SELECT identity, run FROM absent WHERE collection=? AND side=?", (collection, side)
+            )
+        }
+        confirmed = {i for i in identities if i in seen and seen[i] != run}
+        if record:
+            self.db.execute("DELETE FROM absent WHERE collection=? AND side=?", (collection, side))
+            self.db.executemany(
+                "INSERT INTO absent (collection, identity, side, run, ts) VALUES (?, ?, ?, ?, ?)",
+                [(collection, i, side, seen.get(i, run), time.time()) for i in identities],
+            )
+        return confirmed
+
+    # -- review mail ----------------------------------------------------------
+
+    def review_due(self, current: dict[str, bool], persist_s: float, remind_s: float,
+                   now: float | None = None) -> set[str]:
+        """Record this run's review keys (key -> transient) and return those
+        worth a mail: not mailed within ``remind_s``, and, if transient,
+        reported on every run for at least ``persist_s``."""
+        now = time.time() if now is None else now
+        self.db.execute(
+            f"UPDATE review SET streak=NULL WHERE key NOT IN ({','.join('?' * len(current))})",
+            list(current),
+        )
+        due = set()
+        for key, transient in current.items():
+            self.db.execute(
+                """INSERT INTO review (key, streak, last_seen) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                       streak=COALESCE(review.streak, excluded.streak), last_seen=excluded.last_seen""",
+                (key, now, now),
+            )
+            row = self.db.execute("SELECT streak, last_mailed FROM review WHERE key=?", (key,)).fetchone()
+            if transient and now - row["streak"] < persist_s:
+                continue
+            if row["last_mailed"] is None or now - row["last_mailed"] >= remind_s:
+                due.add(key)
+        self.db.execute("DELETE FROM review WHERE last_seen < ?", (now - 30 * 86400,))
+        return due
+
+    def mark_mailed(self, keys: set[str], now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self.db.executemany("UPDATE review SET last_mailed=? WHERE key=?", [(now, k) for k in keys])
 
     # -- meta ---------------------------------------------------------------
 

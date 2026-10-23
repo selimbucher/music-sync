@@ -47,6 +47,7 @@ def test_liked_signature_change_relists(tmp_path):
     spotify.calls.clear()
     Engine(apple, spotify, st, cfg).sync()
     assert ("list_liked",) in spotify.calls
+    Engine(apple, spotify, st, cfg).sync()
     assert apple.liked_ == ["am-a"]
 
 

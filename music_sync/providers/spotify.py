@@ -202,9 +202,21 @@ class Spotify:
     # -- reads --------------------------------------------------------------
 
     def playlists(self) -> list[PlaylistRef]:
+        """Raises when the pages hold fewer playlists than ``total`` says: the
+        engine reads a missing playlist as a deleted one."""
         me = self.me()
+        rows, total = [], None
+        url, params = "/me/playlists", {"limit": PAGE}
+        while url:
+            body = self._req("GET", url, params=params).json()
+            params = None
+            total = body.get("total") if total is None else total
+            rows += [p for p in body.get("items") or [] if p]
+            url = body.get("next")
+        if total is not None and len(rows) < total:
+            raise RuntimeError(f"spotify: /me/playlists listed {len(rows)} of {total}")
         out = []
-        for p in self._pages("/me/playlists", {"limit": PAGE}):
+        for p in rows:
             out.append(PlaylistRef(
                 native_id=p["id"], name=p.get("name", ""),
                 editable=(p.get("owner") or {}).get("id") == me,

@@ -61,6 +61,8 @@ def test_bidirectional_add_and_delete_after_seed(env):
     apple.liked_.remove("am-a")
     engine(env).sync()
     assert sorted(apple.liked_) == ["am-b", "am-e"]
+    assert sorted(spotify.liked_) == ["sp-a", "sp-b", "sp-e"]    # the removal waits for a second read
+    engine(env).sync()
     assert sorted(spotify.liked_) == ["sp-b", "sp-e"]
     assert st.last_known(LIKED) == {"track:ISRC-B", "track:ISRC-E"}
 
@@ -129,6 +131,7 @@ def test_guard_aborts_mass_deletion(env):
     engine(env).seed()
     apple.liked_ = ["am-a"]           # 4 of 5 vanish from Apple at once
     cfg.max_delete_ratio = 0.5
+    engine(env).sync()                # first read: held, nothing to guard yet
     e = engine(env)
     e.sync()
     assert e.outcomes[0].skipped and "deleted" in e.outcomes[0].skipped
@@ -182,6 +185,8 @@ def test_playlist_created_and_deleted_after_seed(env):
     assert late and apple.playlists_[late[0]]["items"] == ["am-c"]
     gym_sp = [pid for pid, p in spotify.playlists_.items() if p["name"] == "Gym"][0]
     del apple.playlists_["am-pl-1"]                                                  # deleted on Apple
+    engine(env).sync()
+    assert gym_sp in spotify.playlists_                                              # one read is not enough
     engine(env).sync()
     assert gym_sp not in spotify.playlists_
 

@@ -15,6 +15,7 @@ import argparse
 import fcntl
 import http.server
 import logging
+import re
 import secrets
 import sys
 import time
@@ -32,6 +33,11 @@ from .state import State
 from .sync import Engine
 
 log = logging.getLogger("music-sync")
+
+# A standing issue is mailed once, then weekly while it lasts. A transient one
+# (a failed or implausible read) only once every run for an hour has hit it.
+REVIEW_PERSIST_S = 3600
+REVIEW_REMIND_S = 7 * 86400
 
 
 def _providers(cfg: Config, state: State) -> tuple[Apple, Spotify]:
@@ -61,6 +67,29 @@ def _lock(cfg: Config):
     return fh
 
 
+def _review_key(line: str) -> str:
+    """One key per issue: API error bodies carry per-request ids, and counts
+    drift from run to run."""
+    return re.sub(r"\d+", "#", re.sub(r"\{.*\}", "{}", line))
+
+
+def _notify(cfg: Config, state: State, subject: str, lines: list[str], transient: set[str], body: str) -> None:
+    """Mail ``body`` if any of ``lines`` is due (see REVIEW_*). Every run calls
+    this, also without lines, so an issue that stops being reported loses its
+    streak."""
+    keys: dict[str, bool] = {}
+    for line in lines:
+        k = _review_key(line)
+        keys[k] = keys.get(k, True) and line in transient
+    due = state.review_due(keys, REVIEW_PERSIST_S, REVIEW_REMIND_S)
+    if not due:
+        return
+    new = [line for line in lines if _review_key(line) in due]
+    text = "Not mailed this week:\n" + "\n".join("  - " + line for line in new) + "\n\n" + body
+    if notify.send(cfg.notify_email, cfg.notify_from, subject, text):
+        state.mark_mailed(due)
+
+
 def _run(args, cfg: Config, seed: bool) -> int:
     lock = _lock(cfg)
     if lock is None:
@@ -71,6 +100,7 @@ def _run(args, cfg: Config, seed: bool) -> int:
     engine = Engine(apple, spotify, state, cfg, dry_run=args.dry_run)
     if getattr(args, "force", False):
         engine.guard = merge.Guard(max_delete_ratio=1.0, max_delete_count=10**9, max_add_count=10**9)
+        engine.max_playlist_deletes = 10**9
     try:
         if seed:
             engine.seed(master=APPLE, prune_playlists=not args.keep_extra_playlists, union=not args.mirror)
@@ -81,7 +111,7 @@ def _run(args, cfg: Config, seed: bool) -> int:
         print(msg, file=sys.stderr)
         state.log(engine.run, "auth_error", detail=str(e))
         if not args.dry_run:
-            notify.send(cfg.notify_email, cfg.notify_from, "credentials dead", msg)
+            _notify(cfg, state, "credentials dead", [f"credentials dead: {str(e).split(':', 1)[0]}"], set(), msg)
         return 3
     except Throttled as e:
         print(e, file=sys.stderr)
@@ -92,11 +122,9 @@ def _run(args, cfg: Config, seed: bool) -> int:
             state.prune_journal()
     report = engine.report()
     print(report)
-    if engine.needs_review:
-        if not args.dry_run:
-            notify.send(cfg.notify_email, cfg.notify_from, "needs review", report)
-        return 2
-    return 0
+    if not args.dry_run:
+        _notify(cfg, state, "needs review", engine.needs_review, engine.transient, report)
+    return 2 if engine.needs_review else 0
 
 
 def _auth_spotify(args, cfg: Config) -> int:

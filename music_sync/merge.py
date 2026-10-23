@@ -22,6 +22,10 @@ Invariants that keep a sync from eating a library:
      failure as a deliberate removal and deletes the original.
   3. A delete batch above the configured share/count of a collection stops the
      collection and is reported for review.
+  4. An absence propagates only once two runs have read it. APIs return
+     short listings that claim to be complete (an Apple page that skips
+     rows, a Spotify playlist list without the user's playlists); a second
+     read 15 minutes later does not repeat the same glitch.
 """
 from __future__ import annotations
 
@@ -41,6 +45,10 @@ class Abort(Exception):
     """Raised when a collection must not be applied."""
 
 
+class Incomplete(Abort):
+    """A provider read failed; usually gone by the next run."""
+
+
 @dataclass
 class Plan:
     collection: str
@@ -52,6 +60,8 @@ class Plan:
     # Identities present on both sides already; carried into last_known as-is.
     stable: set[str] = field(default_factory=set)
     blocked: list[str] = field(default_factory=list)
+    # Removals waiting for a second run to confirm the absence (invariant 4).
+    held: set[str] = field(default_factory=set)
 
     @property
     def empty(self) -> bool:
@@ -196,7 +206,7 @@ def require_complete(collection_complete: dict[str, bool], label: str) -> None:
     """Invariant 1. Any incomplete listing forbids deletions for the whole set."""
     missing = [s for s, ok in collection_complete.items() if not ok]
     if missing:
-        raise Abort(
+        raise Incomplete(
             f"{label}: listing incomplete on {', '.join(missing)}; "
             "skipping to avoid mirroring a partial read as deletions"
         )

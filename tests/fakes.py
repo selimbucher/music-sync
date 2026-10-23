@@ -30,6 +30,8 @@ class Fake:
         self.ignore: set[str] = set()   # natives accepted but silently dropped, like Apple's 202
         self.stuck: set[str] = set()    # natives whose removal is accepted but never happens
         self.lag = 0                    # listings that pass before queued writes show up
+        self.unlisted: set[str] = set() # playlist ids a glitching /me/playlists leaves out
+        self.short: set[str] = set()    # natives a glitching page drops from a "complete" listing
         self._queued: list = []
 
     # -- helpers ------------------------------------------------------------
@@ -67,7 +69,7 @@ class Fake:
         self._tick()
         if not self.complete:
             return Listing(items=[], complete=False, error="truncated")
-        return Listing(items=[self._item(n, i) for i, n in enumerate(natives)], complete=True)
+        return Listing(items=[self._item(n, i) for i, n in enumerate(natives) if n not in self.short], complete=True)
 
     def _native_of(self, it: Item) -> str:
         if self.side == APPLE:
@@ -81,7 +83,7 @@ class Fake:
 
     def playlists(self):
         return [PlaylistRef(pid, p["name"], snapshot=(str(p["items"]) if self.side == SPOTIFY else None))
-                for pid, p in self.playlists_.items()]
+                for pid, p in self.playlists_.items() if pid not in self.unlisted]
 
     def playlist_items(self, pid):
         self.calls.append(("list_playlist", pid))

@@ -51,6 +51,7 @@ def test_star_and_unstar_flow_both_ways(env):
     assert spotify.playlists_["sp-fav"]["items"] == ["sp-a", "sp-b"]
     spotify.playlists_["sp-fav"]["items"].remove("sp-a")  # drop from the Spotify playlist
     run(env)
+    run(env)
     assert apple.favorites_ == ["am-b"]                 # un-starred on Apple
 
 
@@ -67,6 +68,7 @@ def test_deleting_the_playlist_does_not_unstar_anything(env):
     apple.favorites_ = ["am-a", "am-b"]
     run(env, seed=True)
     spotify.playlists_.clear()                          # user deletes the playlist
+    assert not run(env).needs_review                    # one listing without it proves nothing
     e = run(env)
     assert sorted(apple.favorites_) == ["am-a", "am-b"]
     (pid, pl), = spotify.playlists_.items()
@@ -81,6 +83,7 @@ def test_unstar_that_does_not_take_is_retried_not_resurrected(env):
     run(env, seed=True)
     apple.stuck = {"am-a"}                              # Apple accepts the unstar but keeps the star
     spotify.playlists_["sp-fav"]["items"].remove("sp-a")
+    run(env)
     e = run(env)
     assert "am-a" in apple.favorites_
     assert any("still there" in r for r in e.needs_review)

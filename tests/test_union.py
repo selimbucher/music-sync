@@ -54,6 +54,7 @@ def test_after_union_seed_deletions_propagate(env):
     run(env, union_seed=True)
     spotify.liked_.remove("sp-a")
     run(env)
+    run(env)
     assert apple.liked_ == ["am-b"]
 
 

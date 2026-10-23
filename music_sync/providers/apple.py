@@ -165,9 +165,11 @@ class Apple:
         carry = {k: v for k, v in (params or {}).items() if k in self._CARRY}
         while url:
             r = self._req("GET", url, ok=(200, 404), params=params if first else (carry or None))
-            first = False
             if r.status_code == 404:
-                return  # empty relationship
+                if first:
+                    return  # empty relationship
+                raise RuntimeError(f"apple: 404 on a later page of {path}")
+            first = False
             body = r.json()
             yield from body.get("data", [])
             nxt = body.get("next")
